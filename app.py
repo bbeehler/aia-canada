@@ -202,7 +202,7 @@ def add_action_note(mention_id, note_text, user):
 # --- 3. MODULE 1: INBOX / TRIAGE ---
 if app_mode == "📥 Inbox / Triage":
     st.subheader("📥 Unprocessed Mention Queue")
-    st.write("Review, assign, and triage incoming raw tracking records.")
+    st.write("Review, assign, and triage incoming raw tracking records. Use the checkboxes to delete items in bulk.")
     
     response = supabase.table("mentions").select("*").eq("status", "pending").order("inserted_at", desc=True).execute()
     mentions = response.data
@@ -210,7 +210,43 @@ if app_mode == "📥 Inbox / Triage":
     if not mentions:
         st.success("All caught up! No pending un-triaged mentions found in the queue.")
     else:
-        st.info(f"Found {len(mentions)} unprocessed mention records requiring validation.")
+        # Convert pending items to a dataframe for high-speed multi-row selection
+        pending_df = pd.DataFrame(mentions)
+        
+        triage_display_cols = ["outlet_platform", "title", "date_published", "theme", "sentiment_category"]
+        
+        # 1. Interactive Table with multi-row checkbox selection enabled
+        triage_selection = st.dataframe(
+            pending_df[triage_display_cols],
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="multi-row"  # <-- Enables multi-row selection checkboxes
+        )
+        
+        # Extract selected row indices
+        selected_rows = triage_selection.get("selection", {}).get("rows", [])
+        
+        # 2. BULK CONTROLS DECK
+        if len(selected_rows) > 0:
+            st.markdown(f"### 🛠️ Bulk Actions ({len(selected_rows)} items selected)")
+            
+            # Action Row
+            bulk_c1, bulk_c2 = st.columns([1, 4])
+            with bulk_c1:
+                # Big prominent delete button activated when rows are ticked
+                if st.button("🗑️ Bulk Delete Selected", type="primary", use_container_width=True):
+                    with st.spinner("Wiping items from queue..."):
+                        for row_idx in selected_rows:
+                            target_id = pending_df.iloc[row_idx]["id"]
+                            supabase.table("mentions").delete().eq("id", target_id).execute()
+                    st.toast(f"Successfully deleted {len(selected_rows)} mentions.")
+                    time.sleep(1)
+                    st.rerun()
+            st.markdown("---")
+            
+        # 3. INDIVIDUAL EXPANDER TRIAGE PANEL (Kept below so you can still read full text snippets and add notes if needed)
+        st.markdown("### 📄 Detailed Classification Workspaces")
         for m in mentions:
             with st.expander(f"🔍 {m['outlet_platform']} | {m['title']} (Published: {m['date_published']})"):
                 st.info(f"🤖 **Gemini Strategic Action Recommendation:** {m.get('ai_action_recommendation', 'N/A')}")
@@ -230,20 +266,20 @@ if app_mode == "📥 Inbox / Triage":
                 st.markdown("---")
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
-                    new_rec = st.selectbox("Assign Action Item", ["monitor only", "engage", "share", "ignore"], index=0, key=f"rec_{m['id']}", disabled=IS_VIEWER)
+                    new_rec = st.selectbox("Assign Action Item", ["monitor only", "engage", "share", "ignore"], index=0, key=f"rec_{m['id']}")
                 with c2:
-                    new_level = st.selectbox("Assign Severity Level", ["Low", "Medium", "High", "Critical"], key=f"lvl_{m['id']}", disabled=IS_VIEWER)
+                    new_level = st.selectbox("Assign Severity Level", ["Low", "Medium", "High", "Critical"], key=f"lvl_{m['id']}")
                 with c3:
-                    assignee = st.selectbox("Assign to Team User", TEAM_USERS, key=f"user_{m['id']}", disabled=IS_VIEWER)
+                    assignee = st.selectbox("Assign to Team User", TEAM_USERS, key=f"user_{m['id']}")
                 with c4:
-                    escalation_target = st.selectbox("If Escalated, Route to", TEAM_USERS, key=f"esc_{m['id']}", disabled=IS_VIEWER)
+                    escalation_target = st.selectbox("If Escalated, Route to", TEAM_USERS, key=f"esc_{m['id']}")
                 
-                note_text = st.text_input("Log Action Taken / Progress Note:", key=f"note_input_{m['id']}", placeholder="Type out workflow changes or notes here...", disabled=IS_VIEWER)
+                note_text = st.text_input("Log Action Taken / Progress Note:", key=f"note_input_{m['id']}", placeholder="Type out workflow changes or notes here...")
                 
                 st.markdown("---")
                 b1, b2, b3 = st.columns([2, 2, 1])
                 with b1:
-                    if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
+                    if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True):
                         determined_status = "escalated" if new_level in ["High", "Critical"] else "logged"
                         if note_text.strip():
                             add_action_note(m['id'], f"Initial Triage Note: {note_text}", assignee)
@@ -257,14 +293,14 @@ if app_mode == "📥 Inbox / Triage":
                         }).eq("id", m['id']).execute()
                         st.rerun()
                 with b2:
-                    if st.button("Add Progress Note Only", key=f"note_btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
+                    if st.button("Add Progress Note Only", key=f"note_btn_{m['id']}", use_container_width=True):
                         if note_text.strip():
                             add_action_note(m['id'], note_text, assignee)
                             st.rerun()
                         else:
                             st.error("Note text field cannot be blank.")
                 with b3:
-                    if st.button("🗑️ Delete Mention", key=f"del_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
+                    if st.button("🗑️ Delete Mention", key=f"del_{m['id']}", use_container_width=True):
                         delete_mention_record(m['id'])
                         st.rerun()
 
