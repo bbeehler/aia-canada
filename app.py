@@ -1,12 +1,24 @@
 import streamlit as st
+import requests
 import os
 from supabase import create_client, Client
 from google import genai
 from google.genai import types
 
-# 1. Initialize Clients Safely
+# --- 1. CONFIGURATION & APP INITIALIZATION ---
+st.set_page_config(
+    page_title="AIA Canada Media Monitor", 
+    layout="wide",
+    page_icon="📊"
+)
+
+# Repository coordinates for manual dispatch tracking
+GITHUB_REPO = "beehlerb/aia-canada"  # Update with your exact username/repo if different
+WORKFLOW_FILE = "monitor.yml"
+
 @st.cache_resource
 def init_connections():
+    """Safely initializes standard connections to Supabase and Google GenAI."""
     sb_url = st.secrets["SUPABASE_URL"]
     sb_key = st.secrets["SUPABASE_KEY"]
     gemini_key = st.secrets["GEMINI_API_KEY"]
@@ -15,85 +27,221 @@ def init_connections():
     gem_client = genai.Client(api_key=gemini_key)
     return sb_client, gem_client
 
-supabase, ai_client = init_connections()
+try:
+    supabase, ai_client = init_connections()
+except Exception as e:
+    st.error("Initialization Error: Check your Streamlit Secrets configuration.")
+    st.stop()
 
-st.sidebar.header("Navigation")
-app_mode = st.sidebar.radio("Go to", ["Weekly Summarizer", "Database Q&A Assistant"])
+# --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
+st.sidebar.title("📊 AIA Canada Monitor")
+st.sidebar.caption("Media Tracking & Analytics Platform")
 
-# --- MODULE A: WEEKLY SUMMARIZER ENGINE ---
-if app_mode == "Weekly Summarizer":
-    st.subheader("📝 Template 2: Weekly Trend Summary Generator")
-    st.write("This engine reads recent processed mentions from Supabase and applies the AIA Canada formal analysis templates.")
+def trigger_github_sync():
+    """Triggers the automated Python monitoring script via GitHub Actions API."""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['GITHUB_PAT']}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    data = {"ref": "main"} 
     
-    if st.button("Generate Weekly Analysis with Gemini"):
-        with st.spinner("Analyzing data and generating report structural layers..."):
-            # Fetch last 7 days of non-pending logs
-            raw_data = supabase.table("mentions").select("*").neq("status", "pending").limit(50).execute()
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 204:
+            st.sidebar.success("🚀 Sync triggered on GitHub! Fresh data will appear in ~1 minute.")
+        else:
+            st.sidebar.error(f"❌ API Error: {response.status_code}")
+            st.sidebar.caption(response.text)
+    except Exception as e:
+        st.sidebar.error(f"Connection failed: {e}")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔄 Manual Data Sync")
+st.sidebar.write("Force an immediate web crawl and database collection layer update:")
+if st.sidebar.button("Force Fetch Mentions Now", use_container_width=True):
+    with st.sidebar.spinner("Pinging GitHub Actions API..."):
+        trigger_github_sync()
+
+st.sidebar.markdown("---")
+app_mode = st.sidebar.radio(
+    "Navigation Menu", 
+    ["📥 Inbox / Triage", "🚨 Daily Crisis Center", "📝 Weekly Summarizer", "💬 Database Q&A Assistant"]
+)
+
+# --- 3. MODULE 1: INBOX / TRIAGE ---
+if app_mode == "📥 Inbox / Triage":
+    st.subheader("📥 Unprocessed Mention Queue")
+    st.write("Review, classify, and audit incoming raw brand tracking records.")
+    
+    response = supabase.table("mentions").select("*").eq("status", "pending").order("inserted_at", desc=True).execute()
+    mentions = response.data
+    
+    if not mentions:
+        st.success("All caught up! No pending un-triaged mentions found in the queue.")
+    else:
+        st.info(f"Found {len(mentions)} unprocessed mention records requiring validation.")
+        for m in mentions:
+            with st.expander(f"🔍 {m['outlet_platform']} | {m['title']} (Published: {m['date_published']})"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**URL:** [Open Original Snippet Source]({m['url']})")
+                    st.write(f"**Brands Explicitly Affected:** {', '.join(m['brands_affected']) if m['brands_affected'] else 'None Specified'}")
+                    st.write(f"**Identified Theme Layer:** {m['theme']}")
+                    st.write(f"**Raw Metric Snippet:** *\"{m['snippet']}\"*")
+                with col2:
+                    st.write(f"**Inferred Sentiment:** `{m['sentiment_category']}` (Score: {m['sentiment_score']})")
+                    st.write(f"**Sentiment Rationale:** {m['sentiment_rationale']}")
+                    
+                    if m['naming_error_flag'] or m['data_conflict_flag']:
+                        st.warning(f"⚠️ **Quality Flag Raised:** {m['data_conflict_details'] or 'Incorrect branding variation used.'}")
+                
+                st.markdown("---")
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    new_rec = st.selectbox("Assign Action Item", ["monitor only", "engage", "share", "ignore"], index=2, key=f"rec_{m['id']}")
+                with c2:
+                    new_level = st.selectbox("Assign Severity Level", ["Low", "Medium", "High", "Critical"], key=f"lvl_{m['id']}")
+                with c3:
+                    new_status = st.selectbox("Update Tracking Status", ["logged", "escalated", "resolved"], key=f"stat_{m['id']}")
+                
+                if st.button("Commit Classification Details", key=f"btn_{m['id']}", use_container_width=True):
+                    supabase.table("mentions").update({
+                        "recommendation": new_rec,
+                        "alert_level": new_level,
+                        "status": new_status
+                    }).eq("id", m['id']).execute()
+                    st.toast("Mention details successfully updated!")
+                    st.rerun()
+
+# --- 4. MODULE 2: DAILY CRISIS CENTER ---
+elif app_mode == "🚨 Daily Crisis Center":
+    st.subheader("🚨 Template 1: Daily Crisis Alert Generator")
+    st.write("Escalate high-priority brand risks, boilerplate alignment problems, or factual misattributions.")
+    
+    response = supabase.table("mentions").select("*").in_("alert_level", ["High", "Critical"]).neq("status", "resolved").execute()
+    crisis_items = response.data
+    
+    if not crisis_items:
+        st.success("Excellent. No high-severity or critical items require manual escalation alerts right now.")
+    else:
+        selected_title = st.selectbox("Select high-priority mention to format:", [c['title'] for c in crisis_items])
+        item = next(c for c in crisis_items if c['title'] == selected_title)
+        
+        st.markdown("### 📋 Formatted Crisis Escalation Draft")
+        
+        subject_line = f"SUBJECT: [{item['alert_level'].upper()} RISK ALERT] {item['title']} - {item['date_published']}"
+        st.text_input("Recommended Subject Line", subject_line)
+        
+        # Format layout using standard structural requirements
+        markdown_body = f"""**Alert Level:** {item['alert_level']}
+**Brand(s) affected:** {', '.join(item['brands_affected'])}
+**Time detected:** {item['inserted_at']}
+**Source:** {item['outlet_platform']} - [Source Link]({item['url']})
+
+### WHAT HAPPENED
+{item['snippet']}
+
+### WHY IT MATTERS
+* **Audience(s) exposed:** Members | Government/Policymakers | General public
+* **Sentiment status:** {item['sentiment_category']}
+* **Context Rationale:** {item['sentiment_rationale']}
+
+### RELATED WATCH-LIST HITS
+* **Keyword/Theme Triggered:** {item['theme']}
+* **Naming or Data-Conflict Issue Involved?** {"Yes - " + item['data_conflict_details'] if item['data_conflict_flag'] else "No"}
+
+### RECOMMENDED IMMEDIATE ACTION
+[ ] No action needed, monitor only
+[ ] Draft corporate holding statement
+[ ] Loop in Communications for response
+[X] Escalate to Director, Digital Marketing, Communications and Engagement
+{"[X] Escalate to President (Emily Chung) - Critical Priority Input Weight Required" if item['alert_level'] == "Critical" else "[ ] Escalate to President (Emily Chung)"}
+"""
+        st.text_area("Markdown Summary Text Content", markdown_body, height=400)
+        
+        if st.button("Log and Register Escalation Report", use_container_width=True):
+            supabase.table("reports").insert({
+                "report_type": f"Daily Crisis Alert: {item['alert_level']}",
+                "markdown_content": markdown_body
+            }).execute()
+            st.success("Crisis operational report safely archived into management table!")
+
+# --- 5. MODULE 3: WEEKLY SUMMARIZER ---
+elif app_mode == "📝 Weekly Summarizer":
+    st.subheader("📝 Template 2: Weekly Trend Summary Engine")
+    st.write("Leverages Gemini to synthesize the weekly trend report from recent database data tracking records.")
+    
+    if st.button("Generate Weekly Trend Analysis Document", use_container_width=True):
+        with st.spinner("Compiling transaction histories and processing with Gemini..."):
+            raw_data = supabase.table("mentions").select("*").neq("status", "pending").limit(100).execute()
             
             if not raw_data.data:
-                st.warning("No recent processed tracking data was found in Supabase to analyze.")
+                st.warning("No validated tracking records were discovered within the data tables to analyze.")
             else:
-                # Compile structural data context payload for Gemini
-                data_payload = str(raw_data.data)
+                data_string_context = str(raw_data.data)
                 
-                # Instruction prompt feeding standard formatting rules to Gemini
                 system_instruction = (
-                    "You are the senior media analyst for AIA Canada. Your job is to draft a Weekly Trend Summary. "
-                    "Follow these rules strictly:\n"
-                    "1. State facts plainly; never editorialize or assign motives.\n"
-                    "2. Always name explicitly which sub-brands are affected (AIA Canada, YPA, CCIF, I-CAR Canada).\n"
-                    "3. Cite or highlight any naming errors or open data conflicts encountered in the logs.\n"
-                    "4. Use Canadian Press (CP) spelling styles (e.g., colour, behaviour, per cent).\n"
-                    "5. Format your output exactly matching Template 2 requirements: Executive Summary, Volume & Sentiment Breakdown table, Top Mentions table, and Competitor Coverage summary."
+                    "You are the senior media monitoring AI analyst for AIA Canada. Draft a Weekly Trend Summary "
+                    "grounded strictly in the historical database records provided. Follow these structural constraints:\n"
+                    "1. State facts and analytical findings plainly; do not editorialize or infer intent.\n"
+                    "2. Explicitly name exactly which sub-brands are impacted (AIA Canada, YPA, CCIF, I-CAR Canada).\n"
+                    "3. Flag and highlight any ongoing data valuation conflicts (e.g., $37.8B vs current $43.9B standard) or naming errors.\n"
+                    "4. Use Canadian Press (CP) stylistic configurations (British/Canadian spelling: colour, behaviour, per cent).\n"
+                    "5. Build exact structural outputs containing: Executive Summary, Volume & Sentiment Overview markdown matrix, Top Mentions table, Watch-List Performance metrics, and Action Recommendations for next week."
                 )
                 
-                # Call Gemini
                 response = ai_client.models.generate_content(
                     model="gemini-2.5-flash",
-                    contents=[f"Here is the database log snippet from the last 7 days: {data_payload}"],
+                    contents=[f"Database transactional tracking logs for processing: {data_string_context}"],
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction
                     )
                 )
                 
-                # Render complete markdown artifact safely
-                st.success("Draft Generated Successfully!")
-                st.markdown(response.text)
+                st.session_state["latest_weekly_report"] = response.text
+                st.success("Weekly Analysis Generation Complete!")
                 
-                # Archive the generated text context for audit tracking
-                if st.button("Save and Archive Generated Report"):
-                    supabase.table("reports").insert({
-                        "report_type": "Weekly Trend Summary",
-                        "markdown_content": response.text
-                    }).execute()
-                    st.toast("Report securely archived in reports historical table!")
+    if "latest_weekly_report" in st.session_state:
+        st.markdown("### Generated Report Preview")
+        st.markdown(st.session_state["latest_weekly_report"])
+        
+        if st.button("Archive Report Output File", use_container_width=True):
+            supabase.table("reports").insert({
+                "report_type": "Weekly Trend Summary",
+                "markdown_content": st.session_state["latest_weekly_report"]
+            }).execute()
+            st.toast("Report successfully logged to reports data table!")
 
-# --- MODULE B: DATABASE Q&A ASSISTANT ---
-elif app_mode == "Database Q&A Assistant":
-    st.subheader("💬 Ask Your Media Database")
-    st.write("Ask questions about brand reputation, trends, or specific watch-list hits.")
+# --- 6. MODULE 4: DATABASE Q&A ASSISTANT ---
+elif app_mode == "💬 Database Q&A Assistant":
+    st.subheader("💬 Ask Your Media Monitoring Database")
+    st.write("Query your database tracking index using generative intelligence grounding.")
     
-    user_query = st.text_input("Example: Are there any recent data conflicts regarding our $43.9 billion industry valuation?")
+    user_query = st.text_input(
+        "Enter your tracking question:", 
+        placeholder="Example: Have there been any recent complaints or comments regarding membership costs?"
+    )
     
     if user_query:
-        with st.spinner("Analyzing database items..."):
-            # Fetch raw elements for contextual grounding
-            all_mentions = supabase.table("mentions").select("title, outlet_platform, theme, sentiment_category, data_conflict_details, data_conflict_flag").limit(100).execute()
-            db_context = str(all_mentions.data)
+        with st.spinner("Scanning indexing contexts and formulating answer..."):
+            all_mentions = supabase.table("mentions").select("title, outlet_platform, theme, sentiment_category, data_conflict_details, recommendation, alert_level").limit(150).execute()
+            db_payload_context = str(all_mentions.data)
             
             qa_instruction = (
-                "You are an AI assistant helping AIA Canada team members look through their media monitoring records. "
-                "Answer the user query completely using only the database context provided. If the information is not present, "
-                "state that clearly without fabricating insights. Maintain a supportive, smart tone."
+                "You are an intelligent data specialist tracking brand awareness for AIA Canada. Your role is to answer user analytical "
+                "queries completely and truthfully based only on the literal database lists and context blocks provided. If an insight or record "
+                "is absent or completely outside the data scope, explain that clearly without fabricating assumptions or conclusions."
             )
             
             response = ai_client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=[f"Database context entries:\n{db_context}\n\nUser Question: {user_query}"],
+                contents=[f"Grounding Data Context Scope:\n{db_payload_context}\n\nUser Search Query: {user_query}"],
                 config=types.GenerateContentConfig(
                     system_instruction=qa_instruction
                 )
             )
             
-            st.markdown("### 🤖 Assistant Response")
-            st.write(response.text)
+            st.markdown("### 🤖 Assistant Answer")
+            st.info(response.text)
