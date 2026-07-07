@@ -38,7 +38,7 @@ except Exception as e:
 if "auth_user" not in st.session_state:
     st.session_state["auth_user"] = None
 if "user_role" not in st.session_state:
-    st.session_state["user_role"] = "Viewer"  # Default restrictive fallback
+    st.session_state["user_role"] = "Viewer"  
 if "user_full_name" not in st.session_state:
     st.session_state["user_full_name"] = ""
 
@@ -57,13 +57,11 @@ if st.session_state["auth_user"] is None:
                     res = supabase.auth.sign_in_with_password({"email": login_email, "password": login_password})
                     st.session_state["auth_user"] = res.user
                     
-                    # Fetch custom role parameters from database profile row
                     role_query = supabase.table("monitor_users").select("user_role, full_name").eq("user_id", res.user.id).execute()
                     if role_query.data:
                         st.session_state["user_role"] = role_query.data[0]["user_role"]
                         st.session_state["user_full_name"] = role_query.data[0]["full_name"]
                     else:
-                        # Fallback profile setup if user exists in auth but missing in meta-table
                         st.session_state["user_role"] = "Viewer"
                         st.session_state["user_full_name"] = res.user.email
                         
@@ -74,13 +72,11 @@ if st.session_state["auth_user"] is None:
                     st.error(f"Authentication Failed: {login_err}")
     st.stop()
 
-# Short-hand variables for readability downstream
 USER_ROLE = st.session_state["user_role"]
 IS_ADMIN = USER_ROLE == "Administrator"
-IS_MANAGER = USER_ROLE == "Editor"  # 'Editor' text context maps to Manager execution specifications
+IS_MANAGER = USER_ROLE == "Editor"  
 IS_VIEWER = USER_ROLE == "Viewer"
 
-# --- DYNAMIC CONFIGURATION FACTORIES ---
 def load_active_team_users():
     try:
         res = supabase.table("monitor_users").select("full_name").order("full_name").execute()
@@ -166,8 +162,6 @@ def trigger_github_sync(tbs_val):
     except Exception as e:
         st.sidebar.error(f"Connection failed: {e}")
 
-st.sidebar.write("Force an immediate open web crawl update:")
-# Disable crawl buttons entirely for Viewer profiles
 if st.sidebar.button("Force Fetch Mentions Now", use_container_width=True, disabled=IS_VIEWER):
     with st.sidebar.spinner("Pinging GitHub Actions API..."):
         trigger_github_sync(selected_tbs)
@@ -365,7 +359,6 @@ elif app_mode == "📋 Reviewed Database Table":
                     history_df = history_df.rename(columns={"inserted_at": "Timestamp", "performed_by": "User", "action_note": "Action Details"})
                     st.table(history_df[["Timestamp", "User", "Action Details"]])
                 
-                # Render editing panels only for Admin/Manager roles
                 st.markdown("#### ✏️ Update Classification & Append New Action Log")
                 e1, e2, e3, e4 = st.columns(4)
                 with e1:
@@ -441,7 +434,6 @@ elif app_mode == "📝 Weekly Summarizer":
     except Exception:
         system_instruction = "You are the senior media monitoring AI analyst for AIA Canada. Format using CP rules."
 
-    # Viewers CAN generate reports
     if st.button("Generate Weekly Trend Analysis Document", use_container_width=True):
         with st.spinner("Compiling database records for processing with Gemini..."):
             raw_data = supabase.table("mentions").select("*").neq("status", "pending").limit(100).execute()
@@ -481,11 +473,10 @@ elif app_mode == "⚙️ System Settings Dashboard":
     
     tab_users, tab_keywords, tab_templates = st.tabs(["👥 User Accounts & Role Permissions", "🔑 Search Keywords & Phrases", "📝 AI Report Templates"])
     
-    # 1. USER ACCOUNTS (Admin-Only for modifications, but Viewers/Managers can use password reset)
+    # 1. USER ACCOUNTS
     with tab_users:
         st.markdown("### 👥 Manage Active Platform Operators & Auth Credentials")
         
-        # Account Creation Form (Admin Only)
         if IS_ADMIN:
             with st.form("create_user_security_form", clear_on_submit=True):
                 st.markdown("**Provision New Secured Account Profile**")
@@ -517,14 +508,12 @@ elif app_mode == "⚙️ System Settings Dashboard":
         else:
             st.info("ℹ️ Account provisioning frameworks are restricted to system Administrators.")
 
-        # Real-time Edit, Password Reset, and Deletion Deck
         st.markdown("---")
         st.markdown("### 🛠️ Profile Management & Security Resets")
         u_res = supabase.table("monitor_users").select("*").order("full_name").execute()
         
         if u_res.data:
             for current_row in u_res.data:
-                # Restrict loop viewing: Viewers and Managers can only edit/reset their own profile row entry
                 is_own_profile = current_row['user_id'] == st.session_state["auth_user"].id
                 if not IS_ADMIN and not is_own_profile:
                     continue
@@ -538,7 +527,7 @@ elif app_mode == "⚙️ System Settings Dashboard":
                             ["Administrator", "Editor", "Viewer"], 
                             index=current_role_idx, 
                             key=f"edit_role_select_{current_row['id']}",
-                            disabled=not IS_ADMIN # Block role alterations unless Administrator
+                            disabled=not IS_ADMIN
                         )
                         if st.button("Overwrite Access Role", key=f"save_role_btn_{current_row['id']}", disabled=not IS_ADMIN):
                             supabase.table("monitor_users").update({"user_role": update_role_selection}).eq("id", current_row['id']).execute()
@@ -546,7 +535,6 @@ elif app_mode == "⚙️ System Settings Dashboard":
                             st.rerun()
                             
                     with col_e2:
-                        # ALL users can change passwords for profiles they have access to expand here
                         overwrite_password_string = st.text_input("Overwrite Password / Force Reset", type="password", key=f"reset_pass_field_{current_row['id']}", placeholder="Type new credentials string...")
                         if st.button("Deploy New Password Overwrite", key=f"save_pass_btn_{current_row['id']}"):
                             if len(overwrite_password_string) >= 6:
@@ -569,29 +557,80 @@ elif app_mode == "⚙️ System Settings Dashboard":
                             st.success("Identity vectors cleared.")
                             st.rerun()
 
-    # 2. KEYWORD MANAGEMENT LAYOUT (Admin-Only)
+    # 2. KEYWORD MANAGEMENT LAYOUT (Featuring Bulk Excel Upload)
     with tab_keywords:
         st.markdown("### 🔑 Target Keyword Monitoring Framework")
         
         if IS_ADMIN:
-            with st.form("add_kw_form", clear_on_submit=True):
-                st.markdown("**Add New Search Target Phrasing**")
-                k_term = st.text_input("Exact Search Query Word/Phrase")
-                k_brands = st.text_input("Associated Impact Brands (Comma Separated)")
-                k_theme = st.text_input("Theme Layer Category")
+            col_single, col_bulk = st.columns(2)
+            
+            with col_single:
+                with st.form("add_kw_form", clear_on_submit=True):
+                    st.markdown("**Add Single Search Target Phrasing**")
+                    k_term = st.text_input("Exact Search Query Word/Phrase")
+                    k_brands = st.text_input("Associated Impact Brands (Comma Separated)")
+                    k_theme = st.text_input("Theme Layer Category")
+                    
+                    if st.form_submit_button("Commit Query to Search Engine Index"):
+                        if k_term.strip():
+                            brand_list = [b.strip() for b in k_brands.split(",") if b.strip()]
+                            try:
+                                supabase.table("monitor_keywords").insert({"term": k_term, "brand_tags": brand_list, "theme_layer": k_theme}).execute()
+                                st.success(f"Logged search query phrase: '{k_term}'")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed to index tracking term: {e}")
+            
+            # --- NEW EXCEL BULK UPLOADER BLOCK ---
+            with col_bulk:
+                st.markdown("**Bulk Upload Keywords from Excel**")
+                st.caption("Upload an .xlsx file. The sheet MUST contain exactly these column headers: **term**, **brand_tags**, and **theme_layer**. Multiple brands under 'brand_tags' should be separated by commas.")
                 
-                if st.form_submit_button("Commit Query to Search Engine Index"):
-                    if k_term.strip():
-                        brand_list = [b.strip() for b in k_brands.split(",") if b.strip()]
-                        try:
-                            supabase.table("monitor_keywords").insert({"term": k_term, "brand_tags": brand_list, "theme_layer": k_theme}).execute()
-                            st.success(f"Logged search query phrase: '{k_term}'")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Failed to index tracking term: {e}")
+                uploaded_excel = st.file_uploader("Choose Excel File", type=["xlsx"])
+                if uploaded_excel is not None:
+                    try:
+                        excel_df = pd.read_excel(uploaded_excel)
+                        required_cols = {"term", "brand_tags", "theme_layer"}
+                        
+                        if not required_cols.issubset(excel_df.columns):
+                            st.error(f"Invalid column configuration headers. Found: {list(excel_df.columns)}. Needed: term, brand_tags, theme_layer")
+                        else:
+                            st.dataframe(excel_df, use_container_width=True)
+                            
+                            if st.button("Confirm Bulk Ingestion Matrix into Database", type="primary", use_container_width=True):
+                                success_count = 0
+                                error_count = 0
+                                
+                                with st.spinner("Streaming rows safely into database engine ledger..."):
+                                    for idx, row in excel_df.iterrows():
+                                        term_val = str(row['term']).strip()
+                                        if not term_val or term_val == "nan":
+                                            continue
+                                        
+                                        # Parse comma-separated strings inside excel into a list array
+                                        raw_brands = str(row['brand_tags'])
+                                        brand_tags_list = [b.strip() for b in raw_brands.split(",") if b.strip() and b.lower() != "nan"]
+                                        theme_val = str(row['theme_layer']).strip() if str(row['theme_layer']).lower() != "nan" else "General"
+                                        
+                                        try:
+                                            supabase.table("monitor_keywords").upsert({
+                                                "term": term_val,
+                                                "brand_tags": brand_tags_list,
+                                                "theme_layer": theme_val
+                                            }, on_conflict="term").execute()
+                                            success_count += 1
+                                        except Exception:
+                                            error_count += 1
+                                            
+                                st.success(f"Bulk run finished! Managed to register {success_count} keywords cleanly. Errors dropped: {error_count}")
+                                time.sleep(1.5)
+                                st.rerun()
+                    except Exception as parse_err:
+                        st.error(f"Failed to unpack Excel binary: {parse_err}")
         else:
             st.info("ℹ️ Search framework scope changes are restricted to system Administrators.")
 
+        st.markdown("---")
         st.markdown("**Active Scraped Keywords Index Matrix**")
         k_res = supabase.table("monitor_keywords").select("*").order("term").execute()
         if k_res.data:
@@ -605,7 +644,7 @@ elif app_mode == "⚙️ System Settings Dashboard":
                     st.success(f"Removed target query sequence: '{kw_to_del}'")
                     st.rerun()
 
-    # 3. AI REPORT PROMPT TEMPLATE EDITOR (Admin-Only)
+    # 3. AI REPORT PROMPT TEMPLATE EDITOR
     with tab_templates:
         st.markdown("### 📝 AI Generation System Report Prompt Templates")
         t_res = supabase.table("monitor_templates").select("*").order("template_name").execute()
