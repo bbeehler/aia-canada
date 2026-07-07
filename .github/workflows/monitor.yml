@@ -25,7 +25,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install supabase requests google-genai
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Or explicitly force it if your requirements file isn't synced:
+          # pip install supabase google-genai requests dateparser
 
       - name: Execute Monitor and Push to Supabase
         env:
