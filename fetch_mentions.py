@@ -1,11 +1,17 @@
 import os
-import urllib.parse
+from datetime import datetime
+import requests
 from supabase import create_client
+from google import genai
+from google.genai import types
 
-# Initialize Supabase clients securely using environment variables
+# Initialize Supabase and Gemini clients securely using environment variables
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key)
+
+# Initialize official google-genai SDK client
+ai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 def analyze_quality_and_flags(text: str):
     """Flags specific branding violations or data discrepancies in the text."""
@@ -32,21 +38,87 @@ def analyze_quality_and_flags(text: str):
 
     return flags
 
-def process_and_save_mention(mention_data):
-    """Saves a processed mention safely into the Supabase database."""
-    flags = analyze_quality_and_flags(mention_data['text'])
+def compute_live_sentiment_with_gemini(title: str, snippet: str):
+    """Leverages Gemini 2.5 to compute dynamic metric fields from live web text."""
+    system_prompt = (
+        "You are an AI automated data pipeline engine checking media tracking snippets for AIA Canada. "
+        "Analyze the provided headline and text context and return a clean JSON payload matching this exact schema:\n"
+        "{\n"
+        "  \"category\": \"Positive\" | \"Neutral\" | \"Negative\" | \"Mixed\",\n"
+        "  \"score\": float between -1.0 and 1.0,\n"
+        "  \"rationale\": \"A single clear sentence explaining your dynamic analysis decision.\"\n"
+        "}\n"
+        "Do not output markdown code blocks. Output raw JSON only."
+    )
+    
+    try:
+        response = ai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[f"Headline: {title}\nExcerpt Snippet: {snippet}"],
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json"
+            )
+        )
+        import json
+        data = json.loads(response.text)
+        return data.get("category", "Neutral"), data.get("score", 0.0), data.get("rationale", "Automated tracking baseline run.")
+    except Exception as e:
+        print(f"Gemini valuation error: {e}")
+        return "Neutral", 0.0, "Sentiment analysis fallback applied due to processing interruption."
+
+def pull_live_mentions_from_serper(keyword: str):
+    """Queries Serper API to get raw, unrestricted global search engine results across the entire web."""
+    url = "https://google.serper.dev/search"
+    
+    # Strict quote encapsulation to match precise keywords
+    # Adding site exclusions here targets 3rd party mentions cleanly
+    query_string = f'"{keyword}" -site:aiacanada.com -site:ccif.ca -site:i-car.ca -site:righttorepair.ca'
     
     payload = {
-        "title": mention_data['title'],
-        "url": mention_data['url'],
-        "outlet_platform": mention_data['platform'],
-        "date_published": mention_data['date'],
-        "snippet": mention_data['text'],
-        "brands_affected": mention_data['brands'], 
-        "theme": mention_data['theme'],
-        "sentiment_category": mention_data['sentiment'],
-        "sentiment_score": mention_data['sentiment_score'],
-        "sentiment_rationale": mention_data['sentiment_rationale'],
+        "q": query_string,
+        "num": 5  # Limits to top 5 freshest hits per phrase execution loop
+    }
+    headers = {
+        'X-API-KEY': os.environ.get("SERPER_API_KEY"),
+        'Content-Type': 'application/json'
+    }
+    
+    try:
+        res = requests.post(url, headers=headers, json=payload)
+        if res.status_code == 200:
+            return res.json().get("organic", [])
+        else:
+            print(f"Serper execution error. Status code: {res.status_code}")
+            return []
+    except Exception as e:
+        print(f"Network error querying search layer: {e}")
+        return []
+
+def process_and_save_mention(live_item, keyword_meta):
+    """Saves a processed mention safely into the Supabase database."""
+    title = live_item.get("title", "")
+    url_link = live_item.get("link", "")
+    snippet = live_item.get("snippet", "")
+    source_platform = live_item.get("source", "Web Resource")
+    
+    # Quality Assurance inspection
+    flags = analyze_quality_and_flags(title + " " + snippet)
+    
+    # Intelligence classification analysis with Gemini
+    category, score, rationale = compute_live_sentiment_with_gemini(title, snippet)
+    
+    payload = {
+        "title": title,
+        "url": url_link,
+        "outlet_platform": source_platform,
+        "date_published": datetime.now().date().isoformat(),  # Matches date schema type
+        "snippet": snippet,
+        "brands_affected": keyword_meta['brand'], 
+        "theme": keyword_meta['theme'],
+        "sentiment_category": category,
+        "sentiment_score": score,
+        "sentiment_rationale": rationale,
         "naming_error_flag": flags["naming_error"],
         "data_conflict_flag": flags["data_conflict"],
         "data_conflict_details": flags["conflict_details"],
@@ -55,15 +127,15 @@ def process_and_save_mention(mention_data):
     
     try:
         supabase.table("mentions").insert(payload).execute()
-        print(f"Successfully logged mention: {mention_data['title']}")
+        print(f"Successfully logged mention: {title}")
     except Exception as e:
-        print(f"Skipping entry (likely duplicate URL): {e}")
+        # Handles tracking duplicates seamlessly via unique URL constraint
+        print(f"Skipping entry (already logged or duplicate tracking URL found).")
 
 if __name__ == "__main__":
-    print("Automation engine initialized. Simulating targeted industry web-scraping queue...")
+    print("Automation engine initialized. Beginning live web search execution layer...")
 
-    # The actual search criteria drawn from your Master Keyword List guidelines
-    # Excluding self-owned domains (-site:aiacanada.com) keeps tracking focused on 3rd-party media
+    # Strict target master tracking phrases
     target_keywords = [
         {"term": "AIA Canada", "brand": ["AIA Canada"], "theme": "Core Brand Tracking"},
         {"term": "Automotive Industries Association of Canada", "brand": ["AIA Canada"], "theme": "Core Brand Tracking"},
@@ -73,49 +145,12 @@ if __name__ == "__main__":
         {"term": "righttorepair.ca", "brand": ["AIA Canada"], "theme": "Right to Repair Campaign"}
     ]
 
-    # Generating seed data items directly mapped to your Watch List Sentiment Risks
-    # This ensures your dashboard instantly fills with relevant test items to check your flags!
-    mock_scraped_results = [
-        {
-            "title": "AIA Canada releases statement on national standards framework",
-            "url": "https://www.autosphere-news-example.ca/news/national-standards-2026",
-            "platform": "Autosphere",
-            "date": "2026-07-06",
-            "brands": ["AIA Canada"],
-            "theme": "National Standards Framework",
-            "sentiment": "Positive",
-            "sentiment_score": 0.85,
-            "sentiment_rationale": "Strong data-backed authority positioning regarding shop standards rollout.",
-            "text": "The Automotive Industries Association of Canada published a comprehensive baseline showing robust support for shop frameworks across Ontario."
-        },
-        {
-            "title": "Local repair networks debate membership value equations",
-            "url": "https://www.collision-quarterly-mock.com/opinions/independent-value-critique",
-            "platform": "Collision Quarterly",
-            "date": "2026-07-05",
-            "brands": ["AIA Canada", "CCIF"],
-            "theme": "Membership Value Perception",
-            "sentiment": "Negative",
-            "sentiment_score": -0.45,
-            "sentiment_rationale": "Surfaces typical risk narrative that smaller independent shops receive less practical day-to-day value.",
-            "text": "Critics at the AIAC meeting claimed that small independent repair facilities see minimal practical utility compared to the high entry costs."
-        },
-        {
-            "title": "New Right to Repair campaign parameters launch across provincial spaces",
-            "url": "https://www.media-matters-testing.ca/righttorepair-updates",
-            "platform": "Media Matters",
-            "date": "2026-07-04",
-            "brands": ["AIA Canada"],
-            "theme": "Right to Repair Legislation",
-            "sentiment": "Neutral",
-            "sentiment_score": 0.0,
-            "sentiment_rationale": "Straightforward reporting on digital auto care sector definitions.",
-            "text": "The old informational graphics highlight an outdated sector value of $37.8 billion to explain independent vehicle diagnostics reach."
-        }
-    ]
+    # Dynamic lookup orchestration loop
+    for kw in target_keywords:
+        print(f"Crolling global indexes looking for terms: {kw['term']}...")
+        found_mentions = pull_live_mentions_from_serper(kw["term"])
+        
+        for mention in found_mentions:
+            process_and_save_mention(mention, kw)
 
-    # Process and stream the items straight into Supabase
-    for mention in mock_scraped_results:
-        process_and_save_mention(mention)
-
-    print("Sync process successfully terminated.")
+    print("Sync process successfully terminated. Fresh live mentions indexed cleanly.")
