@@ -22,8 +22,8 @@ app_mode = st.sidebar.radio("Go to", ["Weekly Summarizer", "Database Q&A Assista
 
 # --- MODULE A: WEEKLY SUMMARIZER ENGINE ---
 if app_mode == "Weekly Summarizer":
-    st.subheader("📝 Template 2: Weekly Trend Summary Generator")[cite: 2]
-    st.write("This engine reads recent processed mentions from Supabase and applies the AIA Canada formal analysis templates.")[cite: 2]
+    st.subheader("📝 Template 2: Weekly Trend Summary Generator")
+    st.write("This engine reads recent processed mentions from Supabase and applies the AIA Canada formal analysis templates.")
     
     if st.button("Generate Weekly Analysis with Gemini"):
         with st.spinner("Analyzing data and generating report structural layers..."):
@@ -36,7 +36,7 @@ if app_mode == "Weekly Summarizer":
                 # Compile structural data context payload for Gemini
                 data_payload = str(raw_data.data)
                 
-                # Instruction prompt feeding standard formatting rules to Gemini[cite: 2, 4]
+                # Instruction prompt feeding standard formatting rules to Gemini
                 system_instruction = (
                     "You are the senior media analyst for AIA Canada. Your job is to draft a Weekly Trend Summary. "
                     "Follow these rules strictly:\n"
@@ -45,7 +45,7 @@ if app_mode == "Weekly Summarizer":
                     "3. Cite or highlight any naming errors or open data conflicts encountered in the logs.\n"
                     "4. Use Canadian Press (CP) spelling styles (e.g., colour, behaviour, per cent).\n"
                     "5. Format your output exactly matching Template 2 requirements: Executive Summary, Volume & Sentiment Breakdown table, Top Mentions table, and Competitor Coverage summary."
-                )[cite: 2, 4]
+                )
                 
                 # Call Gemini
                 response = ai_client.models.generate_content(
@@ -56,7 +56,7 @@ if app_mode == "Weekly Summarizer":
                     )
                 )
                 
-                # Render complete markdown artifact safely[cite: 2]
+                # Render complete markdown artifact safely
                 st.success("Draft Generated Successfully!")
                 st.markdown(response.text)
                 
@@ -71,9 +71,9 @@ if app_mode == "Weekly Summarizer":
 # --- MODULE B: DATABASE Q&A ASSISTANT ---
 elif app_mode == "Database Q&A Assistant":
     st.subheader("💬 Ask Your Media Database")
-    st.write("Ask questions about brand reputation, trends, or specific watch-list hits.")[cite: 3]
+    st.write("Ask questions about brand reputation, trends, or specific watch-list hits.")
     
-    user_query = st.text_input("Example: Are there any recent data conflicts regarding our $43.9 billion industry valuation?")[cite: 3, 4]
+    user_query = st.text_input("Example: Are there any recent data conflicts regarding our $43.9 billion industry valuation?")
     
     if user_query:
         with st.spinner("Analyzing database items..."):
@@ -84,7 +84,7 @@ elif app_mode == "Database Q&A Assistant":
             qa_instruction = (
                 "You are an AI assistant helping AIA Canada team members look through their media monitoring records. "
                 "Answer the user query completely using only the database context provided. If the information is not present, "
-                "state that clearly without fabricating insights. Maintain a supportive, smart tone."[cite: 4]
+                "state that clearly without fabricating insights. Maintain a supportive, smart tone."
             )
             
             response = ai_client.models.generate_content(
