@@ -1,3 +1,6 @@
 streamlit
 supabase
+pandas
 google-genai
+requests
+openpyxl
