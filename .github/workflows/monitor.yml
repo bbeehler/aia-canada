@@ -9,11 +9,13 @@ jobs:
   run-monitor:
     runs-on: ubuntu-latest
     steps:
+      # Upgraded to v6 to natively target Node 24
       - name: Checkout repository files
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v6
 
+      # Upgraded to v6 to natively target Node 24
       - name: Set up Python environment
-        uses: actions/setup-python@v5.4.0
+        uses: actions/setup-python@v6
         with:
           python-version: '3.10'
 
