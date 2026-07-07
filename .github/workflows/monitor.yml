@@ -1,0 +1,30 @@
+name: Daily Media Monitoring Sync
+
+on:
+  schedule:
+    # Runs at 08:00 AM UTC (4:00 AM EST) every single day
+    - cron: '0 8 * * *'
+  workflow_dispatch: # Allows you to run it manually via the GitHub website anytime
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository files
+        uses: actions/checkout@v4
+
+      - name: Set up Python environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install database dependencies
+        run: |
+          pip install supabase
+
+      - name: Execute Monitor and Push to Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # Add search or scraping API keys here if needed
+        run: python fetch_mentions.py
