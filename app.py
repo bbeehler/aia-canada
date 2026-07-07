@@ -34,9 +34,13 @@ except Exception as e:
     st.error("Initialization Error: Check your Streamlit Secrets configuration.")
     st.stop()
 
-# --- 🔐 SUPABASE AUTH / LOGIN SESSION CONTROL LAYER ---
+# --- 🔐 SUPABASE AUTH & ROLE LOOKUP INTERCEPTOR ---
 if "auth_user" not in st.session_state:
     st.session_state["auth_user"] = None
+if "user_role" not in st.session_state:
+    st.session_state["user_role"] = "Viewer"  # Default restrictive fallback
+if "user_full_name" not in st.session_state:
+    st.session_state["user_full_name"] = ""
 
 if st.session_state["auth_user"] is None:
     st.markdown("<h2 style='text-align: center;'>📊 AIA Canada Media Monitor Access Portal</h2>", unsafe_allow_html=True)
@@ -52,12 +56,29 @@ if st.session_state["auth_user"] is None:
                 try:
                     res = supabase.auth.sign_in_with_password({"email": login_email, "password": login_password})
                     st.session_state["auth_user"] = res.user
-                    st.success("Access authorized! Initializing platform profiles...")
+                    
+                    # Fetch custom role parameters from database profile row
+                    role_query = supabase.table("monitor_users").select("user_role, full_name").eq("user_id", res.user.id).execute()
+                    if role_query.data:
+                        st.session_state["user_role"] = role_query.data[0]["user_role"]
+                        st.session_state["user_full_name"] = role_query.data[0]["full_name"]
+                    else:
+                        # Fallback profile setup if user exists in auth but missing in meta-table
+                        st.session_state["user_role"] = "Viewer"
+                        st.session_state["user_full_name"] = res.user.email
+                        
+                    st.success(f"Access authorized as {st.session_state['user_role']}!")
                     time.sleep(1)
                     st.rerun()
                 except Exception as login_err:
                     st.error(f"Authentication Failed: {login_err}")
     st.stop()
+
+# Short-hand variables for readability downstream
+USER_ROLE = st.session_state["user_role"]
+IS_ADMIN = USER_ROLE == "Administrator"
+IS_MANAGER = USER_ROLE == "Editor"  # 'Editor' text context maps to Manager execution specifications
+IS_VIEWER = USER_ROLE == "Viewer"
 
 # --- DYNAMIC CONFIGURATION FACTORIES ---
 def load_active_team_users():
@@ -71,11 +92,12 @@ TEAM_USERS = load_active_team_users()
 
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
 st.sidebar.title("📊 AIA Canada Monitor")
-st.sidebar.caption(f"Operator: {st.session_state['auth_user'].email}")
+st.sidebar.caption(f"Operator: {st.session_state['user_full_name']} ({USER_ROLE})")
 
 if st.sidebar.button("🔒 Sign Out / Lock Session", use_container_width=True):
     supabase.auth.sign_out()
     st.session_state["auth_user"] = None
+    st.session_state["user_role"] = "Viewer"
     st.rerun()
 
 st.sidebar.markdown("---")
@@ -83,7 +105,8 @@ st.sidebar.subheader("🔄 Manual Data Sync")
 
 timeframe_label = st.sidebar.selectbox(
     "Select Search Horizon Window:",
-    ["Past 24 Hours", "Past Week", "Past Month", "Past Year"]
+    ["Past 24 Hours", "Past Week", "Past Month", "Past Year"],
+    disabled=IS_VIEWER
 )
 
 timeframe_map = {
@@ -144,7 +167,8 @@ def trigger_github_sync(tbs_val):
         st.sidebar.error(f"Connection failed: {e}")
 
 st.sidebar.write("Force an immediate open web crawl update:")
-if st.sidebar.button("Force Fetch Mentions Now", use_container_width=True):
+# Disable crawl buttons entirely for Viewer profiles
+if st.sidebar.button("Force Fetch Mentions Now", use_container_width=True, disabled=IS_VIEWER):
     with st.sidebar.spinner("Pinging GitHub Actions API..."):
         trigger_github_sync(selected_tbs)
 
@@ -207,25 +231,25 @@ if app_mode == "📥 Inbox / Triage":
                     st.write(f"**Inferred Sentiment:** `{m['sentiment_category']}` (Score: {m['sentiment_score']})")
                     st.write(f"**Rationale:** {m['sentiment_rationale']}")
                     if m['naming_error_flag'] or m['data_conflict_flag']:
-                        st.warning(f"⚠️ **Flag Raised:** {m['data_conflict_details'] or 'Branding variation error.'}")
+                        st.warning(f"⚠️ **Quality Flag Raised:** {m['data_conflict_details'] or 'Branding variation error.'}")
                 
                 st.markdown("---")
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
-                    new_rec = st.selectbox("Assign Action Item", ["monitor only", "engage", "share", "ignore"], index=0, key=f"rec_{m['id']}")
+                    new_rec = st.selectbox("Assign Action Item", ["monitor only", "engage", "share", "ignore"], index=0, key=f"rec_{m['id']}", disabled=IS_VIEWER)
                 with c2:
-                    new_level = st.selectbox("Assign Severity Level", ["Low", "Medium", "High", "Critical"], key=f"lvl_{m['id']}")
+                    new_level = st.selectbox("Assign Severity Level", ["Low", "Medium", "High", "Critical"], key=f"lvl_{m['id']}", disabled=IS_VIEWER)
                 with c3:
-                    assignee = st.selectbox("Assign to Team User", TEAM_USERS, key=f"user_{m['id']}")
+                    assignee = st.selectbox("Assign to Team User", TEAM_USERS, key=f"user_{m['id']}", disabled=IS_VIEWER)
                 with c4:
-                    escalation_target = st.selectbox("If Escalated, Route to", TEAM_USERS, key=f"esc_{m['id']}")
+                    escalation_target = st.selectbox("If Escalated, Route to", TEAM_USERS, key=f"esc_{m['id']}", disabled=IS_VIEWER)
                 
-                note_text = st.text_input("Log Action Taken / Progress Note:", key=f"note_input_{m['id']}", placeholder="Type out workflow changes or notes here...")
+                note_text = st.text_input("Log Action Taken / Progress Note:", key=f"note_input_{m['id']}", placeholder="Type out workflow changes or notes here...", disabled=IS_VIEWER)
                 
                 st.markdown("---")
                 b1, b2, b3 = st.columns([2, 2, 1])
                 with b1:
-                    if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True):
+                    if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
                         determined_status = "escalated" if new_level in ["High", "Critical"] else "logged"
                         if note_text.strip():
                             add_action_note(m['id'], f"Initial Triage Note: {note_text}", assignee)
@@ -239,21 +263,21 @@ if app_mode == "📥 Inbox / Triage":
                         }).eq("id", m['id']).execute()
                         st.rerun()
                 with b2:
-                    if st.button("Add Progress Note Only", key=f"note_btn_{m['id']}", use_container_width=True):
+                    if st.button("Add Progress Note Only", key=f"note_btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
                         if note_text.strip():
                             add_action_note(m['id'], note_text, assignee)
                             st.rerun()
                         else:
                             st.error("Note text field cannot be blank.")
                 with b3:
-                    if st.button("🗑️ Delete Mention", key=f"del_{m['id']}", use_container_width=True):
+                    if st.button("🗑️ Delete Mention", key=f"del_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
                         delete_mention_record(m['id'])
                         st.rerun()
 
 # --- MODULE 2: REVIEWED DATABASE TABLE ---
 elif app_mode == "📋 Reviewed Database Table":
     st.subheader("📋 Reviewed Mentions Archive")
-    st.write("Use search filters to populate records. Click on any row to load its field profile parameters below.")
+    st.write("Use search filters to populate records. Click on any row to view metadata profiles and historical logs.")
     
     f1, f2, f3 = st.columns([2, 2, 3])
     with f1:
@@ -341,26 +365,27 @@ elif app_mode == "📋 Reviewed Database Table":
                     history_df = history_df.rename(columns={"inserted_at": "Timestamp", "performed_by": "User", "action_note": "Action Details"})
                     st.table(history_df[["Timestamp", "User", "Action Details"]])
                 
+                # Render editing panels only for Admin/Manager roles
                 st.markdown("#### ✏️ Update Classification & Append New Action Log")
                 e1, e2, e3, e4 = st.columns(4)
                 with e1:
                     current_rec_idx = ["monitor only", "engage", "share", "ignore"].index(target_record['recommendation']) if target_record['recommendation'] in ["monitor only", "engage", "share", "ignore"] else 0
-                    edit_rec = st.selectbox("Action Recommendation", ["monitor only", "engage", "share", "ignore"], index=current_rec_idx, key="edit_rec")
+                    edit_rec = st.selectbox("Action Recommendation", ["monitor only", "engage", "share", "ignore"], index=current_rec_idx, key="edit_rec", disabled=IS_VIEWER)
                 with e2:
                     current_lvl_idx = ["Low", "Medium", "High", "Critical"].index(target_record['alert_level']) if target_record['alert_level'] in ["Low", "Medium", "High", "Critical"] else 0
-                    edit_lvl = st.selectbox("Severity Framework", ["Low", "Medium", "High", "Critical"], index=current_lvl_idx, key="edit_lvl")
+                    edit_lvl = st.selectbox("Severity Framework", ["Low", "Medium", "High", "Critical"], index=current_lvl_idx, key="edit_lvl", disabled=IS_VIEWER)
                 with e3:
                     current_stat_idx = ["logged", "escalated", "resolved"].index(target_record['status']) if target_record['status'] in ["logged", "escalated", "resolved"] else 0
-                    edit_stat = st.selectbox("Workflow State", ["logged", "escalated", "resolved"], index=current_stat_idx, key="edit_stat")
+                    edit_stat = st.selectbox("Workflow State", ["logged", "escalated", "resolved"], index=current_stat_idx, key="edit_stat", disabled=IS_VIEWER)
                 with e4:
                     current_user = target_record['assigned_to_user'] if target_record['assigned_to_user'] in TEAM_USERS else "Unassigned"
-                    edit_user = st.selectbox("Reassign Owner", TEAM_USERS, index=TEAM_USERS.index(current_user), key="edit_user")
+                    edit_user = st.selectbox("Reassign Owner", TEAM_USERS, index=TEAM_USERS.index(current_user), key="edit_user", disabled=IS_VIEWER)
                     
-                edit_note = st.text_input("Type new action note to append to history trail:", key="edit_note_input")
+                edit_note = st.text_input("Type new action note to append to history trail:", key="edit_note_input", disabled=IS_VIEWER)
                 
                 m1, m2 = st.columns([1, 4])
                 with m1:
-                    if st.button("Save Changes", type="primary", use_container_width=True, key="save_changes_btn"):
+                    if st.button("Save Changes", type="primary", use_container_width=True, key="save_changes_btn", disabled=IS_VIEWER):
                         if edit_note.strip():
                             add_action_note(target_record['id'], edit_note, edit_user)
                         supabase.table("mentions").update({
@@ -371,9 +396,11 @@ elif app_mode == "📋 Reviewed Database Table":
                         }).eq("id", target_record['id']).execute()
                         st.rerun()
                 with m2:
-                    if st.button("🗑 Permanent Deletion", type="secondary", key="perm_delete_btn"):
+                    if st.button("🗑 Permanent Deletion", type="secondary", key="perm_delete_btn", disabled=IS_VIEWER):
                         delete_mention_record(target_record['id'])
                         st.rerun()
+            else:
+                st.caption("💡 Click on any processed item row inside the tracking matrix above to reveal its parameters.")
 
 # --- MODULE 3: DAILY CRISIS CENTER ---
 elif app_mode == "🚨 Daily Crisis Center":
@@ -414,6 +441,7 @@ elif app_mode == "📝 Weekly Summarizer":
     except Exception:
         system_instruction = "You are the senior media monitoring AI analyst for AIA Canada. Format using CP rules."
 
+    # Viewers CAN generate reports
     if st.button("Generate Weekly Trend Analysis Document", use_container_width=True):
         with st.spinner("Compiling database records for processing with Gemini..."):
             raw_data = supabase.table("mentions").select("*").neq("status", "pending").limit(100).execute()
@@ -453,110 +481,116 @@ elif app_mode == "⚙️ System Settings Dashboard":
     
     tab_users, tab_keywords, tab_templates = st.tabs(["👥 User Accounts & Role Permissions", "🔑 Search Keywords & Phrases", "📝 AI Report Templates"])
     
-    # 1. USER ACCOUNTS & SECURITY PROFILES
+    # 1. USER ACCOUNTS (Admin-Only for modifications, but Viewers/Managers can use password reset)
     with tab_users:
         st.markdown("### 👥 Manage Active Platform Operators & Auth Credentials")
         
-        # User Creation Deck
-        with st.form("create_user_security_form", clear_on_submit=True):
-            st.markdown("**Provision New Secured Account Profile**")
-            new_full_name = st.text_input("Full Display Name / Team Label", placeholder="e.g., Brian Beehler")
-            new_email = st.text_input("Corporate Email Address")
-            new_password = st.text_input("Initial System Password", type="password")
-            new_role = st.selectbox("Access Privilege Scope", ["Administrator", "Editor", "Viewer"])
-            
-            if st.form_submit_button("Provision User Account"):
-                if new_full_name.strip() and new_email.strip() and len(new_password) >= 6:
-                    try:
-                        # 1. Secure account registration inside internal auth table
-                        auth_res = supabase.auth.admin.create_user({
-                            "email": new_email,
-                            "password": new_password,
-                            "email_confirm": True
-                        })
-                        
-                        # 2. Map account descriptors into local system meta-table
-                        supabase.table("monitor_users").insert({
-                            "user_id": auth_res.user.id,
-                            "full_name": new_full_name,
-                            "tracking_email": new_email,
-                            "user_role": new_role
-                        }).execute()
-                        
-                        st.success(f"Successfully provisioned login access for {new_full_name}!")
-                        st.rerun()
-                    except Exception as err:
-                        st.error(f"Provisioning Rejected: {err} (Note: Running this locally requires using your Supabase Service Role key context, or ensuring Auth settings allow public sign-ups.)")
-                else:
-                    st.warning("All input configuration values must be filled. Passwords must be at least 6 characters.")
+        # Account Creation Form (Admin Only)
+        if IS_ADMIN:
+            with st.form("create_user_security_form", clear_on_submit=True):
+                st.markdown("**Provision New Secured Account Profile**")
+                new_full_name = st.text_input("Full Display Name / Team Label")
+                new_email = st.text_input("Corporate Email Address")
+                new_password = st.text_input("Initial System Password", type="password")
+                new_role = st.selectbox("Access Privilege Scope", ["Administrator", "Editor", "Viewer"])
+                
+                if st.form_submit_button("Provision User Account"):
+                    if new_full_name.strip() and new_email.strip() and len(new_password) >= 6:
+                        try:
+                            auth_res = supabase.auth.admin.create_user({
+                                "email": new_email,
+                                "password": new_password,
+                                "email_confirm": True
+                            })
+                            supabase.table("monitor_users").insert({
+                                "user_id": auth_res.user.id,
+                                "full_name": new_full_name,
+                                "tracking_email": new_email,
+                                "user_role": new_role
+                            }).execute()
+                            st.success(f"Successfully provisioned login access for {new_full_name}!")
+                            st.rerun()
+                        except Exception as err:
+                            st.error(f"Provisioning Rejected: {err}")
+                    else:
+                        st.warning("All values must be filled. Passwords must be at least 6 characters.")
+        else:
+            st.info("ℹ️ Account provisioning frameworks are restricted to system Administrators.")
 
         # Real-time Edit, Password Reset, and Deletion Deck
         st.markdown("---")
-        st.markdown("### 🛠️ Current Active Accounts Roster Management")
+        st.markdown("### 🛠️ Profile Management & Security Resets")
         u_res = supabase.table("monitor_users").select("*").order("full_name").execute()
         
         if u_res.data:
             for current_row in u_res.data:
+                # Restrict loop viewing: Viewers and Managers can only edit/reset their own profile row entry
+                is_own_profile = current_row['user_id'] == st.session_state["auth_user"].id
+                if not IS_ADMIN and not is_own_profile:
+                    continue
+                    
                 with st.expander(f"👤 {current_row['full_name']} | Role: {current_row['user_role']} ({current_row['tracking_email']})"):
-                    # Inline property modifications forms layout
                     col_e1, col_e2 = st.columns(2)
                     with col_e1:
-                        # Form to change role values
                         current_role_idx = ["Administrator", "Editor", "Viewer"].index(current_row['user_role'])
-                        update_role_selection = st.selectbox("Modify Privileges Role", ["Administrator", "Editor", "Viewer"], index=current_role_idx, key=f"edit_role_select_{current_row['id']}")
-                        if st.button("Overwrite Access Role", key=f"save_role_btn_{current_row['id']}"):
+                        update_role_selection = st.selectbox(
+                            "Modify Privileges Role", 
+                            ["Administrator", "Editor", "Viewer"], 
+                            index=current_role_idx, 
+                            key=f"edit_role_select_{current_row['id']}",
+                            disabled=not IS_ADMIN # Block role alterations unless Administrator
+                        )
+                        if st.button("Overwrite Access Role", key=f"save_role_btn_{current_row['id']}", disabled=not IS_ADMIN):
                             supabase.table("monitor_users").update({"user_role": update_role_selection}).eq("id", current_row['id']).execute()
                             st.success("User privilege profile updated.")
                             st.rerun()
                             
                     with col_e2:
-                        # Form to securely overwrite passwords
+                        # ALL users can change passwords for profiles they have access to expand here
                         overwrite_password_string = st.text_input("Overwrite Password / Force Reset", type="password", key=f"reset_pass_field_{current_row['id']}", placeholder="Type new credentials string...")
                         if st.button("Deploy New Password Overwrite", key=f"save_pass_btn_{current_row['id']}"):
                             if len(overwrite_password_string) >= 6:
                                 try:
-                                    supabase.auth.admin.update_user_by_id(
-                                        current_row['user_id'], 
-                                        {"password": overwrite_password_string}
-                                    )
-                                    st.success("Security authorization token string updated successfully!")
+                                    supabase.auth.admin.update_user_by_id(current_row['user_id'], {"password": overwrite_password_string})
+                                    st.success("Security token updated successfully!")
                                 except Exception as pass_err:
                                     st.error(f"Password overwrite failed: {pass_err}")
                             else:
                                 st.error("Password strings must be at least 6 characters.")
                     
-                    st.markdown("---")
-                    # Full termination deployment anchor
-                    if st.button("❌ Terminate Account & Wipe Platform Data Logs", key=f"wipe_user_btn_{current_row['id']}", type="primary", use_container_width=True):
-                        try:
-                            # 1. Clean secure auth data records out of main system layers
-                            supabase.auth.admin.delete_user(current_row['user_id'])
-                        except Exception:
-                            pass # Fail-soft if metadata is out-of-sync with core cloud engine
-                        
-                        # 2. Erase user entry row from meta-tracking ledger
-                        supabase.table("monitor_users").delete().eq("id", current_row['id']).execute()
-                        st.success("Identity vectors cleared from systemic logging indexes.")
-                        st.rerun()
+                    if IS_ADMIN:
+                        st.markdown("---")
+                        if st.button("❌ Terminate Account & Wipe Platform Data Logs", key=f"wipe_user_btn_{current_row['id']}", type="primary", use_container_width=True):
+                            try:
+                                supabase.auth.admin.delete_user(current_row['user_id'])
+                            except Exception:
+                                pass
+                            supabase.table("monitor_users").delete().eq("id", current_row['id']).execute()
+                            st.success("Identity vectors cleared.")
+                            st.rerun()
 
-    # 2. KEYWORD MANAGEMENT LAYOUT
+    # 2. KEYWORD MANAGEMENT LAYOUT (Admin-Only)
     with tab_keywords:
         st.markdown("### 🔑 Target Keyword Monitoring Framework")
-        with st.form("add_kw_form", clear_on_submit=True):
-            st.markdown("**Add New Search Target Phrasing**")
-            k_term = st.text_input("Exact Search Query Word/Phrase", placeholder="e.g., AIA Canada Legislation")
-            k_brands = st.text_input("Associated Impact Brands (Comma Separated)", placeholder="e.g., AIA Canada")
-            k_theme = st.text_input("Theme Layer Category", placeholder="e.g., Government Relations")
-            
-            if st.form_submit_button("Commit Query to Search Engine Index"):
-                if k_term.strip():
-                    brand_list = [b.strip() for b in k_brands.split(",") if b.strip()]
-                    try:
-                        supabase.table("monitor_keywords").insert({"term": k_term, "brand_tags": brand_list, "theme_layer": k_theme}).execute()
-                        st.success(f"Logged search query phrase: '{k_term}'")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to index tracking term: {e}")
+        
+        if IS_ADMIN:
+            with st.form("add_kw_form", clear_on_submit=True):
+                st.markdown("**Add New Search Target Phrasing**")
+                k_term = st.text_input("Exact Search Query Word/Phrase")
+                k_brands = st.text_input("Associated Impact Brands (Comma Separated)")
+                k_theme = st.text_input("Theme Layer Category")
+                
+                if st.form_submit_button("Commit Query to Search Engine Index"):
+                    if k_term.strip():
+                        brand_list = [b.strip() for b in k_brands.split(",") if b.strip()]
+                        try:
+                            supabase.table("monitor_keywords").insert({"term": k_term, "brand_tags": brand_list, "theme_layer": k_theme}).execute()
+                            st.success(f"Logged search query phrase: '{k_term}'")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to index tracking term: {e}")
+        else:
+            st.info("ℹ️ Search framework scope changes are restricted to system Administrators.")
 
         st.markdown("**Active Scraped Keywords Index Matrix**")
         k_res = supabase.table("monitor_keywords").select("*").order("term").execute()
@@ -564,13 +598,14 @@ elif app_mode == "⚙️ System Settings Dashboard":
             k_df = pd.DataFrame(k_res.data)
             st.dataframe(k_df[["term", "brand_tags", "theme_layer"]], use_container_width=True, hide_index=True)
             
-            kw_to_del = st.selectbox("Select tracking query to delete:", [kw["term"] for kw in k_res.data])
-            if st.button("Permanently Remove Term From Scraper", type="primary"):
-                supabase.table("monitor_keywords").delete().eq("term", kw_to_del).execute()
-                st.success(f"Removed target query sequence: '{kw_to_del}'")
-                st.rerun()
+            if IS_ADMIN:
+                kw_to_del = st.selectbox("Select tracking query to delete:", [kw["term"] for kw in k_res.data])
+                if st.button("Permanently Remove Term From Scraper", type="primary"):
+                    supabase.table("monitor_keywords").delete().eq("term", kw_to_del).execute()
+                    st.success(f"Removed target query sequence: '{kw_to_del}'")
+                    st.rerun()
 
-    # 3. AI REPORT PROMPT TEMPLATE EDITOR
+    # 3. AI REPORT PROMPT TEMPLATE EDITOR (Admin-Only)
     with tab_templates:
         st.markdown("### 📝 AI Generation System Report Prompt Templates")
         t_res = supabase.table("monitor_templates").select("*").order("template_name").execute()
@@ -579,10 +614,14 @@ elif app_mode == "⚙️ System Settings Dashboard":
             selected_tmpl_name = st.selectbox("Select a report template config to edit:", [t["template_name"] for t in t_res.data])
             current_tmpl = next(t for t in t_res.data if t["template_name"] == selected_tmpl_name)
             
-            with st.form("edit_tmpl_form"):
-                st.write(f"Editing Prompt Architecture for: **{selected_tmpl_name}**")
-                updated_prompt_text = st.text_area("Gemini System Instruction Matrix Guidance Prompt", value=current_tmpl["system_instruction_prompt"], height=300)
-                if st.form_submit_button("Overwrite System Prompt Template Details"):
-                    supabase.table("monitor_templates").update({"system_instruction_prompt": updated_prompt_text}).eq("template_name", selected_tmpl_name).execute()
-                    st.success("AI prompt configuration successfully updated!")
-                    st.rerun()
+            if IS_ADMIN:
+                with st.form("edit_tmpl_form"):
+                    st.write(f"Editing Prompt Architecture for: **{selected_tmpl_name}**")
+                    updated_prompt_text = st.text_area("Gemini System Instruction Matrix Guidance Prompt", value=current_tmpl["system_instruction_prompt"], height=300)
+                    if st.form_submit_button("Overwrite System Prompt Template Details"):
+                        supabase.table("monitor_templates").update({"system_instruction_prompt": updated_prompt_text}).eq("template_name", selected_tmpl_name).execute()
+                        st.success("AI prompt configuration successfully updated!")
+                        st.rerun()
+            else:
+                st.info("ℹ️ AI generation structural system prompts are locked and read-only. Modifications are restricted to system Administrators.")
+                st.text_area("Current Active Blueprint Framework", value=current_tmpl["system_instruction_prompt"], height=250, disabled=True)
