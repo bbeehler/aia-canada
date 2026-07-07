@@ -212,7 +212,7 @@ if app_mode == "📥 Inbox / Triage":
 # --- MODULE 2: REVIEWED DATABASE TABLE ---
 elif app_mode == "📋 Reviewed Database Table":
     st.subheader("📋 Reviewed Mentions Archive")
-    st.write("Use search filters to populate records. Click on any row to load it into the management pane below.")
+    st.write("Use search filters to populate records. Click on any row to load its entire field metadata profile and action logs history below.")
     
     # Filter Layout Panel
     f1, f2, f3 = st.columns([2, 2, 3])
@@ -223,7 +223,6 @@ elif app_mode == "📋 Reviewed Database Table":
     with f3:
         search_kw = st.text_input("Search Title or Snippet Keyword", placeholder="Type a term...")
     
-    # Query database based on user date parameters
     response = supabase.table("mentions")\
         .select("*")\
         .neq("status", "pending")\
@@ -237,7 +236,6 @@ elif app_mode == "📋 Reviewed Database Table":
     else:
         df = pd.DataFrame(reviewed_data)
         
-        # Apply local keyword search if requested
         if search_kw:
             df = df[df['title'].str.contains(search_kw, case=False, na=False) | df['snippet'].str.contains(search_kw, case=False, na=False)]
             
@@ -249,7 +247,6 @@ elif app_mode == "📋 Reviewed Database Table":
                 "sentiment_category", "sentiment_score", "alert_level", "status", "assigned_to_user", "escalated_to_user", "recommendation"
             ]
             
-            # Interactive row selection using dataframe native parameters
             selection = st.dataframe(
                 df[display_columns], 
                 use_container_width=True, 
@@ -261,45 +258,82 @@ elif app_mode == "📋 Reviewed Database Table":
             st.markdown("---")
             st.subheader("🛠️ Active Record Management & Notes Editor")
             
-            # Formulate load indexing logic based on row click events
             if selection and len(selection.get("selection", {}).get("rows", [])) > 0:
                 selected_row_idx = selection["selection"]["rows"][0]
                 target_record = df.iloc[selected_row_idx].to_dict()
                 
-                st.info(f"Active Record: **{target_record['title']}**")
+                # --- NEW COMPREHENSIVE DATA LAYOUT VIEW ---
+                st.markdown(f"### 📄 Full Metadata Profile: `{target_record['title']}`")
                 
-                # Render logs
-                st.markdown("#### 📜 Action Logs & User Notes Trail")
+                # Metadata Field Categorization Grid
+                meta_col1, meta_col2, meta_col3 = st.columns(3)
+                with meta_col1:
+                    st.markdown("**📌 Core Tracking Identifiers**")
+                    st.write(f"- **Database ID (UUID):** `{target_record['id']}`")
+                    st.write(f"- **System Insertion Timestamp:** `{target_record['inserted_at']}`")
+                    st.write(f"- **Official Publication Date:** `{target_record['date_published']}`")
+                    st.write(f"- **Outlet / Resource Platform:** `{target_record['outlet_platform']}`")
+                    st.write(f"- **Direct Source URL:** [Open Live Web Link]({target_record['url']})")
+                
+                with meta_col2:
+                    st.markdown("**🏷️ Corporate Context & Scope Tags**")
+                    st.write(f"- **Brands Explicitly Affected:** {', '.join(target_record['brands_affected']) if target_record['brands_affected'] else 'None mapped'}")
+                    st.write(f"- **Structural Theme Classification:** `{target_record['theme']}`")
+                    st.write(f"- **Workflow Pipeline State:** `{target_record['status']}`")
+                    st.write(f"- **Assigned Active Owner:** `{target_record['assigned_to_user'] or 'Unassigned'}`")
+                    st.write(f"- **Escalation Target Recipient:** `{target_record['escalated_to_user'] or 'None assigned'}`")
+                
+                with meta_col3:
+                    st.markdown("**🧠 Gemini Sentiment Metrics & Quality Flags**")
+                    st.write(f"- **Inferred Tone Category:** `{target_record['sentiment_category']}`")
+                    st.write(f"- **Sentiment Intensity Score (-1.0 to 1.0):** `{target_record['sentiment_score']}`")
+                    st.write(f"- **Action Recommendation Strategy:** `{target_record['recommendation']}`")
+                    st.write(f"- **Corporate Naming Discrepancy Flag:** `{target_record['naming_error_flag']}`")
+                    st.write(f"- **Outdated Data Conflict Flag:** `{target_record['data_conflict_flag']}`")
+                
+                # Content Excerpts Blocks
+                st.markdown("**📝 Text Snippet & Analytical Explanations**")
+                st.write(f"**Raw Text Excerpt Snippet:** *\"{target_record['snippet']}\"*")
+                st.write(f"**Gemini Sentiment Rationale:** *{target_record['sentiment_rationale']}*")
+                
+                if target_record['data_conflict_flag'] or target_record['naming_error_flag']:
+                    st.error(f"⚠️ **Logged Quality Control Conflict Details:** {target_record['data_conflict_details'] or 'Incorrect brand proper noun variant encountered.'}")
+                
+                st.markdown("---")
+                
+                # Chronological Action Log History Frame
+                st.markdown("#### 📜 Actions Taken & Notes History Trail")
                 actions_res = supabase.table("mention_actions").select("*").eq("mention_id", target_record['id']).order("inserted_at", desc=True).execute()
                 
                 if not actions_res.data:
-                    st.caption("No custom action notes recorded for this item yet.")
+                    st.caption("No custom action notes or tracking entries logged for this profile yet.")
                 else:
-                    for act in actions_res.data:
-                        st.caption(f"⏱️ **{act['inserted_at']}** by **{act['performed_by'] or 'System'}**")
-                        st.info(act['action_note'])
+                    # Construct an explicit history table for action notes logs
+                    history_df = pd.DataFrame(actions_res.data)
+                    history_df = history_df.rename(columns={"inserted_at": "Timestamp", "performed_by": "User / Operator", "action_note": "Action Details / Note"})
+                    st.table(history_df[["Timestamp", "User / Operator", "Action Details / Note"]])
                 
-                # Modification options
-                st.markdown("#### ✏️ Modify Properties")
+                # Modification forms panel
+                st.markdown("#### ✏️ Update Classification & Append New Action Log")
                 e1, e2, e3, e4 = st.columns(4)
                 with e1:
                     current_rec_idx = ["monitor only", "engage", "share", "ignore"].index(target_record['recommendation']) if target_record['recommendation'] in ["monitor only", "engage", "share", "ignore"] else 0
-                    edit_rec = st.selectbox("Action Recommendation", ["monitor only", "engage", "share", "ignore"], index=current_rec_idx)
+                    edit_rec = st.selectbox("Action Recommendation", ["monitor only", "engage", "share", "ignore"], index=current_rec_idx, key="edit_rec")
                 with e2:
                     current_lvl_idx = ["Low", "Medium", "High", "Critical"].index(target_record['alert_level']) if target_record['alert_level'] in ["Low", "Medium", "High", "Critical"] else 0
-                    edit_lvl = st.selectbox("Severity Framework", ["Low", "Medium", "High", "Critical"], index=current_lvl_idx)
+                    edit_lvl = st.selectbox("Severity Framework", ["Low", "Medium", "High", "Critical"], index=current_lvl_idx, key="edit_lvl")
                 with e3:
                     current_stat_idx = ["logged", "escalated", "resolved"].index(target_record['status']) if target_record['status'] in ["logged", "escalated", "resolved"] else 0
-                    edit_stat = st.selectbox("Workflow State", ["logged", "escalated", "resolved"], index=current_stat_idx)
+                    edit_stat = st.selectbox("Workflow State", ["logged", "escalated", "resolved"], index=current_stat_idx, key="edit_stat")
                 with e4:
                     current_user = target_record['assigned_to_user'] if target_record['assigned_to_user'] in TEAM_USERS else "Unassigned"
-                    edit_user = st.selectbox("Reassign Owner", TEAM_USERS, index=TEAM_USERS.index(current_user))
+                    edit_user = st.selectbox("Reassign Owner", TEAM_USERS, index=TEAM_USERS.index(current_user), key="edit_user")
                     
-                edit_note = st.text_input("Append New Action Note:", placeholder="Log actions taken or progress adjustments here...")
+                edit_note = st.text_input("Type new action note to append to history trail:", placeholder="e.g., Sent holding statement draft to Emily Chung via email...", key="edit_note_input")
                 
                 m1, m2 = st.columns([1, 4])
                 with m1:
-                    if st.button("Save Changes", type="primary", use_container_width=True):
+                    if st.button("Save Changes", type="primary", use_container_width=True, key="save_changes_btn"):
                         if edit_note.strip():
                             add_action_note(target_record['id'], edit_note, edit_user)
                         supabase.table("mentions").update({
@@ -310,11 +344,11 @@ elif app_mode == "📋 Reviewed Database Table":
                         }).eq("id", target_record['id']).execute()
                         st.rerun()
                 with m2:
-                    if st.button("🗑️ Delete Record Completely", type="secondary"):
+                    if st.button("🗑_ Permanent Deletion", type="secondary", key="perm_delete_btn"):
                         delete_mention_record(target_record['id'])
                         st.rerun()
             else:
-                st.caption("💡 Click on any item row inside the tracking matrix above to load notes, append actions, edit options, or remove entries.")
+                st.caption("💡 Click on any processed item row inside the tracking matrix above to reveal all profile database fields, read history logs, or make record adjustments.")
 
 # --- MODULE 4: DAILY CRISIS CENTER ---
 elif app_mode == "🚨 Daily Crisis Center":
