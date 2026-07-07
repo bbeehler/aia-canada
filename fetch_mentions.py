@@ -115,11 +115,14 @@ if __name__ == "__main__":
         exit(0)
 
     for kw in target_keywords:
-        # term, brand_tags, and theme_layer are loaded straight from the database row entries
         query_string = f"{kw['term']} -site:aiacanada.com -site:ccif.ca -site:i-car.ca -site:righttorepair.ca"
         url = "https://google.serper.dev/search"
         
-        payload = {"q": query_string, "num": 5}
+        payload = {
+            "q": query_string, 
+            "num": 5,
+            "tbs": chosen_timeframe  # <-- Make sure this line is active
+        }
         headers = {'X-API-KEY': os.environ.get("SERPER_API_KEY"), 'Content-Type': 'application/json'}
         
         try:
