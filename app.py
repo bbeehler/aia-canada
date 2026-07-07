@@ -204,37 +204,29 @@ if app_mode == "📥 Inbox / Triage":
     st.subheader("📥 Unprocessed Mention Queue")
     st.write("Review, assign, and triage incoming raw tracking records. Use the checkboxes to delete items in bulk.")
     
-    response = supabase.table("mentions").select("*").eq("status", "pending").order("inserted_at", desc=True).execute()
+    response = supabase.table("mentions").select("*").eq("status", "pending").order("date_published", desc=True).execute()
     mentions = response.data
     
     if not mentions:
         st.success("All caught up! No pending un-triaged mentions found in the queue.")
     else:
-        # Convert pending items to a dataframe for high-speed multi-row selection
         pending_df = pd.DataFrame(mentions)
-        
         triage_display_cols = ["outlet_platform", "title", "date_published", "theme", "sentiment_category"]
         
-        # 1. Interactive Table with multi-row checkbox selection enabled
         triage_selection = st.dataframe(
             pending_df[triage_display_cols],
             use_container_width=True,
             hide_index=True,
             on_select="rerun",
-            selection_mode="multi-row"  # <-- Enables multi-row selection checkboxes
+            selection_mode="multi-row"
         )
         
-        # Extract selected row indices
         selected_rows = triage_selection.get("selection", {}).get("rows", [])
         
-        # 2. BULK CONTROLS DECK
         if len(selected_rows) > 0:
             st.markdown(f"### 🛠️ Bulk Actions ({len(selected_rows)} items selected)")
-            
-            # Action Row
             bulk_c1, bulk_c2 = st.columns([1, 4])
             with bulk_c1:
-                # Big prominent delete button activated when rows are ticked
                 if st.button("🗑️ Bulk Delete Selected", type="primary", use_container_width=True):
                     with st.spinner("Wiping items from queue..."):
                         for row_idx in selected_rows:
@@ -245,7 +237,6 @@ if app_mode == "📥 Inbox / Triage":
                     st.rerun()
             st.markdown("---")
             
-        # 3. INDIVIDUAL EXPANDER TRIAGE PANEL (Kept below so you can still read full text snippets and add notes if needed)
         st.markdown("### 📄 Detailed Classification Workspaces")
         for m in mentions:
             with st.expander(f"🔍 {m['outlet_platform']} | {m['title']} (Published: {m['date_published']})"):
@@ -266,20 +257,20 @@ if app_mode == "📥 Inbox / Triage":
                 st.markdown("---")
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
-                    new_rec = st.selectbox("Assign Action Item", ["monitor only", "engage", "share", "ignore"], index=0, key=f"rec_{m['id']}")
+                    new_rec = st.selectbox("Assign Action Item", ["monitor only", "engage", "share", "ignore"], index=0, key=f"rec_{m['id']}", disabled=IS_VIEWER)
                 with c2:
-                    new_level = st.selectbox("Assign Severity Level", ["Low", "Medium", "High", "Critical"], key=f"lvl_{m['id']}")
+                    new_level = st.selectbox("Assign Severity Level", ["Low", "Medium", "High", "Critical"], key=f"lvl_{m['id']}", disabled=IS_VIEWER)
                 with c3:
-                    assignee = st.selectbox("Assign to Team User", TEAM_USERS, key=f"user_{m['id']}")
+                    assignee = st.selectbox("Assign to Team User", TEAM_USERS, key=f"user_{m['id']}", disabled=IS_VIEWER)
                 with c4:
-                    escalation_target = st.selectbox("If Escalated, Route to", TEAM_USERS, key=f"esc_{m['id']}")
+                    escalation_target = st.selectbox("If Escalated, Route to", TEAM_USERS, key=f"esc_{m['id']}", disabled=IS_VIEWER)
                 
-                note_text = st.text_input("Log Action Taken / Progress Note:", key=f"note_input_{m['id']}", placeholder="Type out workflow changes or notes here...")
+                note_text = st.text_input("Log Action Taken / Progress Note:", key=f"note_input_{m['id']}", placeholder="Type out workflow changes or notes here...", disabled=IS_VIEWER)
                 
                 st.markdown("---")
                 b1, b2, b3 = st.columns([2, 2, 1])
                 with b1:
-                    if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True):
+                    if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
                         determined_status = "escalated" if new_level in ["High", "Critical"] else "logged"
                         if note_text.strip():
                             add_action_note(m['id'], f"Initial Triage Note: {note_text}", assignee)
@@ -293,40 +284,41 @@ if app_mode == "📥 Inbox / Triage":
                         }).eq("id", m['id']).execute()
                         st.rerun()
                 with b2:
-                    if st.button("Add Progress Note Only", key=f"note_btn_{m['id']}", use_container_width=True):
+                    if st.button("Add Progress Note Only", key=f"note_btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
                         if note_text.strip():
                             add_action_note(m['id'], note_text, assignee)
                             st.rerun()
                         else:
                             st.error("Note text field cannot be blank.")
                 with b3:
-                    if st.button("🗑️ Delete Mention", key=f"del_{m['id']}", use_container_width=True):
+                    if st.button("🗑️ Delete Mention", key=f"del_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
                         delete_mention_record(m['id'])
                         st.rerun()
 
 # --- MODULE 2: REVIEWED DATABASE TABLE ---
 elif app_mode == "📋 Reviewed Database Table":
     st.subheader("📋 Reviewed Mentions Archive")
-    st.write("Use search filters to populate records. Click on any row to view metadata profiles and historical logs.")
+    st.write("Use search filters to populate records by actual publication date. Click on any row to view details.")
     
     f1, f2, f3 = st.columns([2, 2, 3])
     with f1:
-        start_date = st.date_input("Start Date", datetime.now().date() - timedelta(days=7))
+        start_date = st.date_input("Start Date (Published)", datetime.now().date() - timedelta(days=7))
     with f2:
-        end_date = st.date_input("End Date", datetime.now().date())
+        end_date = st.date_input("End Date (Published)", datetime.now().date())
     with f3:
         search_kw = st.text_input("Search Title or Snippet Keyword", placeholder="Type a term...")
     
+    # Query constrained directly to the parsed publication date index layer
     response = supabase.table("mentions")\
         .select("*")\
         .neq("status", "pending")\
         .gte("date_published", start_date.isoformat())\
         .lte("date_published", end_date.isoformat())\
-        .order("inserted_at", desc=True).execute()
+        .order("date_published", desc=True).execute()
     reviewed_data = response.data
     
     if not reviewed_data:
-        st.info("No reviewed tracking logs match the specified parameters.")
+        st.info("No reviewed tracking logs match the specified publication parameters.")
     else:
         df = pd.DataFrame(reviewed_data)
         if search_kw:
@@ -593,7 +585,7 @@ elif app_mode == "⚙️ System Settings Dashboard":
                             st.success("Identity vectors cleared.")
                             st.rerun()
 
-    # 2. KEYWORD MANAGEMENT LAYOUT (Featuring Bulk Excel Upload)
+    # 2. KEYWORD MANAGEMENT LAYOUT
     with tab_keywords:
         st.markdown("### 🔑 Target Keyword Monitoring Framework")
         
@@ -617,10 +609,9 @@ elif app_mode == "⚙️ System Settings Dashboard":
                             except Exception as e:
                                 st.error(f"Failed to index tracking term: {e}")
             
-            # --- NEW EXCEL BULK UPLOADER BLOCK ---
             with col_bulk:
                 st.markdown("**Bulk Upload Keywords from Excel**")
-                st.caption("Upload an .xlsx file. The sheet MUST contain exactly these column headers: **term**, **brand_tags**, and **theme_layer**. Multiple brands under 'brand_tags' should be separated by commas.")
+                st.caption("Upload an .xlsx file with column headers: term, brand_tags, theme_layer.")
                 
                 uploaded_excel = st.file_uploader("Choose Excel File", type=["xlsx"])
                 if uploaded_excel is not None:
@@ -629,7 +620,7 @@ elif app_mode == "⚙️ System Settings Dashboard":
                         required_cols = {"term", "brand_tags", "theme_layer"}
                         
                         if not required_cols.issubset(excel_df.columns):
-                            st.error(f"Invalid column configuration headers. Found: {list(excel_df.columns)}. Needed: term, brand_tags, theme_layer")
+                            st.error(f"Invalid columns. Required: term, brand_tags, theme_layer")
                         else:
                             st.dataframe(excel_df, use_container_width=True)
                             
@@ -643,7 +634,6 @@ elif app_mode == "⚙️ System Settings Dashboard":
                                         if not term_val or term_val == "nan":
                                             continue
                                         
-                                        # Parse comma-separated strings inside excel into a list array
                                         raw_brands = str(row['brand_tags'])
                                         brand_tags_list = [b.strip() for b in raw_brands.split(",") if b.strip() and b.lower() != "nan"]
                                         theme_val = str(row['theme_layer']).strip() if str(row['theme_layer']).lower() != "nan" else "General"
@@ -658,7 +648,7 @@ elif app_mode == "⚙️ System Settings Dashboard":
                                         except Exception:
                                             error_count += 1
                                             
-                                st.success(f"Bulk run finished! Managed to register {success_count} keywords cleanly. Errors dropped: {error_count}")
+                                st.success(f"Bulk run finished! Registered {success_count} keywords. Errors: {error_count}")
                                 time.sleep(1.5)
                                 st.rerun()
                     except Exception as parse_err:
@@ -694,7 +684,9 @@ elif app_mode == "⚙️ System Settings Dashboard":
                     st.write(f"Editing Prompt Architecture for: **{selected_tmpl_name}**")
                     updated_prompt_text = st.text_area("Gemini System Instruction Matrix Guidance Prompt", value=current_tmpl["system_instruction_prompt"], height=300)
                     if st.form_submit_button("Overwrite System Prompt Template Details"):
-                        supabase.table("monitor_templates").update({"system_instruction_prompt": updated_prompt_text}).eq("template_name", selected_tmpl_name).execute()
+                        supabase.table("monitor_templates").update({
+                            "system_instruction_prompt": updated_prompt_text
+                        }).eq("template_name", selected_tmpl_name).execute()
                         st.success("AI prompt configuration successfully updated!")
                         st.rerun()
             else:
