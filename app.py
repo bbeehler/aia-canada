@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 # Repository coordinates for manual dispatch tracking
-GITHUB_REPO = "beehlerb/aia-canada"  # Update with your exact username/repo if different
+GITHUB_REPO = "bbeehler/aia-canada"  # Update with your exact username/repo if different
 WORKFLOW_FILE = "monitor.yml"
 
 @st.cache_resource
