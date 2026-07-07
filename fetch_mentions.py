@@ -28,21 +28,39 @@ def analyze_quality_and_flags(text: str):
     return flags
 
 def compute_live_sentiment_with_gemini(title: str, snippet: str):
+    """Leverages Gemini to extract sentiment metrics and clear strategic action recommendations[cite: 2]."""
     system_prompt = (
-        "You are an AI data pipeline engine checking media tracking snippets for AIA Canada. "
-        "Analyze the text and return JSON exactly: {\"category\": \"Positive\"|\"Neutral\"|\"Negative\"|\"Mixed\", \"score\": float, \"rationale\": \"string\"}"
+        "You are an expert PR and media monitoring AI tracking brand reputation for AIA Canada[cite: 2]. "
+        "Analyze the provided headline and snippet text context and return a clean JSON payload matching this exact schema:\n"
+        "{\n"
+        "  \"category\": \"Positive\" | \"Neutral\" | \"Negative\" | \"Mixed\",\n"
+        "  \"score\": float between -1.0 and 1.0,\n"
+        "  \"rationale\": \"A single clear sentence explaining your dynamic analysis decision.\",\n"
+        "  \"ai_action_recommendation\": \"A strategic, 1-2 sentence tactical recommendation explaining exactly what action the team should execute next based on this piece of media (e.g., draft a holding statement, log and add to the weekly report, ignore as industry noise, reach out for light-touch correction). Keep it highly actionable.\"\n"
+        "}\n"
+        "Output raw JSON data files only. Do not format inside markdown blocks."
     )
+    
     try:
         response = ai_client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[f"Headline: {title}\nSnippet: {snippet}"],
-            config=types.GenerateContentConfig(system_instruction=system_prompt, response_mime_type="application/json")
+            contents=[f"Headline: {title}\nExcerpt Snippet: {snippet}"],
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json"
+            )
         )
         import json
         data = json.loads(response.text)
-        return data.get("category", "Neutral"), data.get("score", 0.0), data.get("rationale", "")
-    except Exception:
-        return "Neutral", 0.0, "Fallback configuration execution."
+        return (
+            data.get("category", "Neutral"), 
+            data.get("score", 0.0), 
+            data.get("rationale", "Standard automated processing baseline."),
+            data.get("ai_action_recommendation", "Monitor tracking index; no emergency action required.")
+        )
+    except Exception as e:
+        print(f"Gemini evaluation failure: {e}")
+        return "Neutral", 0.0, "Analysis fallback loops applied.", "Monitor only."
 
 def process_and_save_mention(live_item, keyword_meta):
     title = live_item.get("title", "")
