@@ -14,13 +14,11 @@ st.set_page_config(
     page_icon="📊"
 )
 
-# Repository coordinates for manual dispatch tracking
 GITHUB_REPO = "bbeehler/aia-canada"  
 WORKFLOW_FILE = "monitor.yml"
 
 @st.cache_resource
 def init_connections():
-    """Safely initializes standard connections to Supabase and Google GenAI."""
     sb_url = st.secrets["SUPABASE_URL"]
     sb_key = st.secrets["SUPABASE_KEY"]
     gemini_key = st.secrets["GEMINI_API_KEY"]
@@ -35,6 +33,9 @@ except Exception as e:
     st.error("Initialization Error: Check your Streamlit Secrets configuration.")
     st.stop()
 
+# Mock Team List for assignment routing (Replace with your actual team emails/names if using Supabase Auth)
+TEAM_USERS = ["Unassigned", "Brian Beehler", "Emily Chung", "Jean-François Champagne", "Communications Team"]
+
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
 st.sidebar.title("📊 AIA Canada Monitor")
 st.sidebar.caption("Media Tracking & Analytics Platform")
@@ -42,13 +43,11 @@ st.sidebar.caption("Media Tracking & Analytics Platform")
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔄 Manual Data Sync")
 
-# Dropdown menu to select the timeframe scope
 timeframe_label = st.sidebar.selectbox(
     "Select Search Horizon Window:",
     ["Past 24 Hours", "Past Week", "Past Month", "Past Year"]
 )
 
-# Map human labels directly to standard Google parameters used by Serper (tbs configuration)
 timeframe_map = {
     "Past 24 Hours": "qdr:d",
     "Past Week": "qdr:w",
@@ -58,7 +57,6 @@ timeframe_map = {
 selected_tbs = timeframe_map[timeframe_label]
 
 def get_latest_workflow_run_status():
-    """Queries the GitHub API to check the status of the most recent workflow run."""
     url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/runs"
     headers = {
         "Authorization": f"Bearer {st.secrets['GITHUB_PAT']}",
@@ -77,32 +75,21 @@ def get_latest_workflow_run_status():
     return None, None
 
 def trigger_github_sync(tbs_val):
-    """Triggers the automated Python monitoring script via GitHub Actions API, passing the selected timeframe."""
     url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
     headers = {
         "Authorization": f"Bearer {st.secrets['GITHUB_PAT']}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28"
     }
-    data = {
-        "ref": "main",
-        "inputs": {
-            "timeframe": tbs_val
-        }
-    } 
+    data = {"ref": "main", "inputs": {"timeframe": tbs_val}} 
     
     try:
         response = requests.post(url, headers=headers, json=data)
         if response.status_code == 204:
             st.sidebar.success(f"🚀 Sync initiated for {timeframe_label}!")
-            
-            # --- ACTIVE REFRESH TRACKING ENGINE ---
             with st.spinner("Waiting for GitHub runner to complete search tasks..."):
-                # Give GitHub a few seconds to register and launch the new run
                 time.sleep(5)
-                
-                # Check status every 5 seconds until it completes
-                for _ in range(24):  # Cap timeout at 2 minutes max
+                for _ in range(24): 
                     status, conclusion = get_latest_workflow_run_status()
                     if status == "completed":
                         st.sidebar.success("✅ Extraction complete! Refreshing database tables...")
@@ -115,11 +102,10 @@ def trigger_github_sync(tbs_val):
                 st.rerun()
         else:
             st.sidebar.error(f"❌ API Error: {response.status_code}")
-            st.sidebar.caption(response.text)
     except Exception as e:
         st.sidebar.error(f"Connection failed: {e}")
 
-st.sidebar.write("Force an immediate web crawl and database collection layer update:")
+st.sidebar.write("Force an immediate web crawl update:")
 if st.sidebar.button("Force Fetch Mentions Now", use_container_width=True):
     with st.sidebar.spinner("Pinging GitHub Actions API..."):
         trigger_github_sync(selected_tbs)
@@ -138,17 +124,28 @@ app_mode = st.sidebar.radio(
 
 # --- GLOBAL UTILITY OPERATIONS ---
 def delete_mention_record(record_id):
-    """Permanently deletes an explicit row entry from the Supabase tracking table."""
     try:
         supabase.table("mentions").delete().eq("id", record_id).execute()
-        st.toast("Mention successfully removed from the tracking index!")
+        st.toast("Mention successfully removed from index!")
     except Exception as e:
-        st.error(f"Failed to execute row deletion layer: {e}")
+        st.error(f"Deletion failed: {e}")
+
+def add_action_note(mention_id, note_text, user):
+    if note_text.strip():
+        try:
+            supabase.table("mention_actions").insert({
+                "mention_id": mention_id,
+                "action_note": note_text,
+                "performed_by": user
+            }).execute()
+            st.toast("Action log note saved successfully!")
+        except Exception as e:
+            st.error(f"Failed to record note: {e}")
 
 # --- 3. MODULE 1: INBOX / TRIAGE ---
 if app_mode == "📥 Inbox / Triage":
     st.subheader("📥 Unprocessed Mention Queue")
-    st.write("Review, classify, and audit incoming raw brand tracking records.")
+    st.write("Review, assign, and triage incoming raw tracking records.")
     
     response = supabase.table("mentions").select("*").eq("status", "pending").order("inserted_at", desc=True).execute()
     mentions = response.data
@@ -156,50 +153,71 @@ if app_mode == "📥 Inbox / Triage":
     if not mentions:
         st.success("All caught up! No pending un-triaged mentions found in the queue.")
     else:
-        st.info(f"Found {len(mentions)} unprocessed mention records requiring validation.")
+        st.info(f"Found {len(mentions)} unprocessed mention records requiring verification.")
         for m in mentions:
             with st.expander(f"🔍 {m['outlet_platform']} | {m['title']} (Published: {m['date_published']})"):
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.write(f"**URL:** [Open Original Snippet Source]({m['url']})")
-                    st.write(f"**Brands Explicitly Affected:** {', '.join(m['brands_affected']) if m['brands_affected'] else 'None Specified'}")
-                    st.write(f"**Identified Theme Layer:** {m['theme']}")
-                    st.write(f"**Raw Metric Snippet:** *\"{m['snippet']}\"*")
+                    st.write(f"**URL:** [Open Source]({m['url']})")
+                    st.write(f"**Brands Affected:** {', '.join(m['brands_affected']) if m['brands_affected'] else 'None'}")
+                    st.write(f"**Theme:** {m['theme']}")
+                    st.write(f"**Snippet:** *\"{m['snippet']}\"*")
                 with col2:
                     st.write(f"**Inferred Sentiment:** `{m['sentiment_category']}` (Score: {m['sentiment_score']})")
-                    st.write(f"**Sentiment Rationale:** {m['sentiment_rationale']}")
-                    
+                    st.write(f"**Rationale:** {m['sentiment_rationale']}")
                     if m['naming_error_flag'] or m['data_conflict_flag']:
-                        st.warning(f"⚠️ **Quality Flag Raised:** {m['data_conflict_details'] or 'Incorrect branding variation used.'}")
+                        st.warning(f"⚠️ **Flag Raised:** {m['data_conflict_details'] or 'Branding variation error.'}")
                 
                 st.markdown("---")
+                # Dropdown settings row
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
                     new_rec = st.selectbox("Assign Action Item", ["monitor only", "engage", "share", "ignore"], index=0, key=f"rec_{m['id']}")
                 with c2:
                     new_level = st.selectbox("Assign Severity Level", ["Low", "Medium", "High", "Critical"], key=f"lvl_{m['id']}")
                 with c3:
-                    new_status = st.selectbox("Update Tracking Status", ["logged", "escalated", "resolved"], key=f"stat_{m['id']}")
+                    assignee = st.selectbox("Assign to Team User", TEAM_USERS, key=f"user_{m['id']}")
                 with c4:
-                    st.write("")  
-                    st.write("")
+                    escalation_target = st.selectbox("If Escalated, Route to", TEAM_USERS, key=f"esc_{m['id']}")
+                
+                # Active Notes / Action Logger Section
+                note_text = st.text_input("Log Action Taken / Progress Note:", key=f"note_input_{m['id']}", placeholder="Type out workflow changes or notes here...")
+                
+                st.markdown("---")
+                b1, b2, b3 = st.columns([2, 2, 1])
+                with b1:
+                    if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True):
+                        determined_status = "escalated" if new_level in ["High", "Critical"] else "logged"
+                        
+                        # Save the tracking notes text if provided
+                        if note_text.strip():
+                            add_action_note(m['id'], f"Initial Triage Note: {note_text}", assignee)
+                        
+                        supabase.table("mentions").update({
+                            "recommendation": new_rec,
+                            "alert_level": new_level,
+                            "status": determined_status,
+                            "assigned_to_user": assignee if assignee != "Unassigned" else None,
+                            "escalated_to_user": escalation_target if escalation_target != "Unassigned" else None
+                        }).eq("id", m['id']).execute()
+                        st.rerun()
+                with b2:
+                    # Individual Note Commit button without closing triage loop
+                    if st.button("Add Progress Note Only", key=f"note_btn_{m['id']}", use_container_width=True):
+                        if note_text.strip():
+                            add_action_note(m['id'], note_text, assignee)
+                            st.rerun()
+                        else:
+                            st.error("Note text field cannot be blank.")
+                with b3:
                     if st.button("🗑️ Delete Mention", key=f"del_{m['id']}", use_container_width=True):
                         delete_mention_record(m['id'])
                         st.rerun()
-                
-                if st.button("Commit Classification Details", key=f"btn_{m['id']}", use_container_width=True):
-                    supabase.table("mentions").update({
-                        "recommendation": new_rec,
-                        "alert_level": new_level,
-                        "status": new_status
-                    }).eq("id", m['id']).execute()
-                    st.toast("Mention details successfully updated!")
-                    st.rerun()
 
 # --- MODULE 2: REVIEWED DATABASE TABLE ---
 elif app_mode == "📋 Reviewed Database Table":
     st.subheader("📋 Reviewed Mentions Archive")
-    st.write("Below is the consolidated matrix containing all processed, evaluated, and classified mentions.")
+    st.write("View, manage notes, re-assign users, edit properties, or delete processed records.")
     
     response = supabase.table("mentions").select("*").neq("status", "pending").order("inserted_at", desc=True).execute()
     reviewed_data = response.data
@@ -210,148 +228,128 @@ elif app_mode == "📋 Reviewed Database Table":
         df = pd.DataFrame(reviewed_data)
         display_columns = [
             "date_published", "outlet_platform", "title", "theme", 
-            "sentiment_category", "sentiment_score", "alert_level", "status", "recommendation"
+            "sentiment_category", "sentiment_score", "alert_level", "status", "assigned_to_user", "escalated_to_user", "recommendation"
         ]
         st.dataframe(df[display_columns], use_container_width=True, hide_index=True)
         
         st.markdown("---")
-        st.subheader("🛠️ Record Management Panel")
+        st.subheader("🛠️ Active Record Management & Notes Editor")
         
-        select_to_delete = st.selectbox(
-            "Select a specific reviewed mention to permanently delete:", 
+        select_to_edit = st.selectbox(
+            "Select a specific record to examine notes, edit, or delete:", 
             [r['title'] for r in reviewed_data]
         )
-        target_record = next(r for r in reviewed_data if r['title'] == select_to_delete)
+        target_record = next(r for r in reviewed_data if r['title'] == select_to_edit)
         
-        if st.button("Delete Selected Archive Record", type="primary"):
-            delete_mention_record(target_record['id'])
-            st.rerun()
+        # Display chronological action logs from associated tracking sub-table
+        st.markdown("#### 📜 Action Logs & User Notes Trail")
+        actions_res = supabase.table("mention_actions").select("*").eq("mention_id", target_record['id']).order("inserted_at", desc=True).execute()
+        
+        if not actions_res.data:
+            st.caption("No custom action notes recorded for this item yet.")
+        else:
+            for act in actions_res.data:
+                st.caption(f"⏱️ **{act['inserted_at']}** by **{act['performed_by'] or 'System'}**")
+                st.info(act['action_note'])
+        
+        # Row modification forms block
+        st.markdown("#### ✏️ Modify Properties")
+        e1, e2, e3, e4 = st.columns(4)
+        with e1:
+            current_rec_idx = ["monitor only", "engage", "share", "ignore"].index(target_record['recommendation']) if target_record['recommendation'] in ["monitor only", "engage", "share", "ignore"] else 0
+            edit_rec = st.selectbox("Action Recommendation", ["monitor only", "engage", "share", "ignore"], index=current_rec_idx)
+        with e2:
+            current_lvl_idx = ["Low", "Medium", "High", "Critical"].index(target_record['alert_level']) if target_record['alert_level'] in ["Low", "Medium", "High", "Critical"] else 0
+            edit_lvl = st.selectbox("Severity Framework", ["Low", "Medium", "High", "Critical"], index=current_lvl_idx)
+        with e3:
+            current_stat_idx = ["logged", "escalated", "resolved"].index(target_record['status']) if target_record['status'] in ["logged", "escalated", "resolved"] else 0
+            edit_stat = st.selectbox("Workflow State", ["logged", "escalated", "resolved"], index=current_stat_idx)
+        with e4:
+            current_user = target_record['assigned_to_user'] if target_record['assigned_to_user'] in TEAM_USERS else "Unassigned"
+            edit_user = st.selectbox("Reassign Owner", TEAM_USERS, index=TEAM_USERS.index(current_user))
+            
+        edit_note = st.text_input("Append New Action Note:", placeholder="Log actions taken or progress adjustments here...")
+        
+        m1, m2 = st.columns([1, 4])
+        with m1:
+            if st.button("Save Changes", type="primary", use_container_width=True):
+                if edit_note.strip():
+                    add_action_note(target_record['id'], edit_note, edit_user)
+                supabase.table("mentions").update({
+                    "recommendation": edit_rec,
+                    "alert_level": edit_lvl,
+                    "status": edit_stat,
+                    "assigned_to_user": edit_user if edit_user != "Unassigned" else None
+                }).eq("id", target_record['id']).execute()
+                st.rerun()
+        with m2:
+            if st.button("🗑️ Delete Record Completely", type="secondary"):
+                delete_mention_record(target_record['id'])
+                st.rerun()
 
 # --- MODULE 3: DAILY CRISIS CENTER ---
 elif app_mode == "🚨 Daily Crisis Center":
     st.subheader("🚨 Template 1: Daily Crisis Alert Generator")
-    st.write("Escalate high-priority brand risks, boilerplate alignment problems, or factual misattributions.")
-    
     response = supabase.table("mentions").select("*").in_("alert_level", ["High", "Critical"]).neq("status", "resolved").execute()
     crisis_items = response.data
     
     if not crisis_items:
-        st.success("Excellent. No high-severity or critical items require manual escalation alerts right now.")
+        st.success("No high-severity or critical items require attention.")
     else:
         selected_title = st.selectbox("Select high-priority mention to format:", [c['title'] for c in crisis_items])
         item = next(c for c in crisis_items if c['title'] == selected_title)
         
-        st.markdown("### 📋 Formatted Crisis Escalation Draft")
         subject_line = f"SUBJECT: [{item['alert_level'].upper()} RISK ALERT] {item['title']} - {item['date_published']}"
         st.text_input("Recommended Subject Line", subject_line)
         
         markdown_body = f"""**Alert Level:** {item['alert_level']}
 **Brand(s) affected:** {', '.join(item['brands_affected'])}
-**Time detected:** {item['inserted_at']}
 **Source:** {item['outlet_platform']} - [Source Link]({item['url']})
+**Assigned Owner:** {item['assigned_to_user'] or 'Unassigned'}
+**Escalated Recipient:** {item['escalated_to_user'] or 'None Specified'}
 
 ### WHAT HAPPENED
 {item['snippet']}
 
 ### WHY IT MATTERS
-* **Audience(s) exposed:** Members | Government/Policymakers | General public
-* **Sentiment status:** {item['sentiment_category']}
+* **Sentiment:** {item['sentiment_category']}
 * **Context Rationale:** {item['sentiment_rationale']}
-
-### RELATED WATCH-LIST HITS
-* **Keyword/Theme Triggered:** {item['theme']}
-* **Naming or Data-Conflict Issue Involved?** {"Yes - " + item['data_conflict_details'] if item['data_conflict_flag'] else "No"}
-
-### RECOMMENDED IMMEDIATE ACTION
-[ ] No action needed, monitor only
-[ ] Draft corporate holding statement
-[ ] Loop in Communications for response
-[X] Escalate to Director, Digital Marketing, Communications and Engagement
-{"[X] Escalate to President (Emily Chung) - Critical Priority Input Weight Required" if item['alert_level'] == "Critical" else "[ ] Escalate to President (Emily Chung)"}
 """
-        st.text_area("Markdown Summary Text Content", markdown_body, height=400)
-        
-        if st.button("Log and Register Escalation Report", use_container_width=True):
-            supabase.table("reports").insert({
-                "report_type": f"Daily Crisis Alert: {item['alert_level']}",
-                "markdown_content": markdown_body
-            }).execute()
-            st.success("Crisis operational report safely archived into management table!")
+        st.text_area("Markdown Summary Text Content", markdown_body, height=300)
 
 # --- MODULE 4: WEEKLY SUMMARIZER ---
 elif app_mode == "📝 Weekly Summarizer":
     st.subheader("📝 Template 2: Weekly Trend Summary Engine")
-    st.write("Leverages Gemini to synthesize the weekly trend report from recent database data tracking records.")
-    
     if st.button("Generate Weekly Trend Analysis Document", use_container_width=True):
-        with st.spinner("Compiling transaction histories and processing with Gemini..."):
+        with st.spinner("Compiling database records for processing with Gemini..."):
             raw_data = supabase.table("mentions").select("*").neq("status", "pending").limit(100).execute()
-            
             if not raw_data.data:
                 st.warning("No validated tracking records were discovered within the data tables to analyze.")
             else:
-                data_string_context = str(raw_data.data)
-                
-                system_instruction = (
-                    "You are the senior media monitoring AI analyst for AIA Canada. Draft a Weekly Trend Summary "
-                    "grounded strictly in the historical database records provided. Follow these structural constraints:\n"
-                    "1. State facts and analytical findings plainly; do not editorialize or infer intent.\n"
-                    "2. Explicitly name exactly which sub-brands are impacted (AIA Canada, YPA, CCIF, I-CAR Canada).\n"
-                    "3. Flag and highlight any ongoing data valuation conflicts (e.g., $37.8B vs current $43.9B standard) or naming errors.\n"
-                    "4. Use Canadian Press (CP) stylistic configurations (British/Canadian spelling: colour, behaviour, per cent).\n"
-                    "5. Build exact structural outputs containing: Executive Summary, Volume & Sentiment Overview markdown matrix, Top Mentions table, Watch-List Performance metrics, and Action Recommendations for next week."
-                )
-                
+                system_instruction = "You are the senior media monitoring AI analyst for AIA Canada. Format into Template 2 (Weekly Summary) using CP spelling rules."
                 response = ai_client.models.generate_content(
                     model="gemini-2.5-flash",
-                    contents=[f"Database transactional tracking logs for processing: {data_string_context}"],
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction
-                    )
+                    contents=[f"Logs: {str(raw_data.data)}"],
+                    config=types.GenerateContentConfig(system_instruction=system_instruction)
                 )
-                
                 st.session_state["latest_weekly_report"] = response.text
-                st.success("Weekly Analysis Generation Complete!")
+                st.success("Generation Complete!")
                 
     if "latest_weekly_report" in st.session_state:
-        st.markdown("### Generated Report Preview")
         st.markdown(st.session_state["latest_weekly_report"])
-        
-        if st.button("Archive Report Output File", use_container_width=True):
-            supabase.table("reports").insert({
-                "report_type": "Weekly Trend Summary",
-                "markdown_content": st.session_state["latest_weekly_report"]
-            }).execute()
-            st.toast("Report successfully logged to reports data table!")
 
 # --- MODULE 5: DATABASE Q&A ASSISTANT ---
 elif app_mode == "💬 Database Q&A Assistant":
     st.subheader("💬 Ask Your Media Monitoring Database")
-    st.write("Query your database tracking index using generative intelligence grounding.")
-    
-    user_query = st.text_input(
-        "Enter your tracking question:", 
-        placeholder="Example: Have there been any recent complaints or comments regarding membership costs?"
-    )
+    user_query = st.text_input("Enter your tracking question:", placeholder="Ask about trends, owners, or entries...")
     
     if user_query:
-        with st.spinner("Scanning indexing contexts and formulating answer..."):
-            all_mentions = supabase.table("mentions").select("title, outlet_platform, theme, sentiment_category, data_conflict_details, recommendation, alert_level").limit(150).execute()
-            db_payload_context = str(all_mentions.data)
-            
-            qa_instruction = (
-                "You are an intelligent data specialist tracking brand awareness for AIA Canada. Your role is to answer user analytical "
-                "queries completely and truthfully based only on the literal database lists and context blocks provided. If an insight or record "
-                "is absent or completely outside the data scope, explain that clearly without fabricating assumptions or conclusions."
-            )
-            
+        with st.spinner("Scanning logs..."):
+            all_mentions = supabase.table("mentions").select("title, outlet_platform, theme, sentiment_category, assigned_to_user, alert_level").limit(150).execute()
+            qa_instruction = "You are an intelligent data specialist tracking brand awareness for AIA Canada. Answer using only the literal context provided."
             response = ai_client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=[f"Grounding Data Context Scope:\n{db_payload_context}\n\nUser Search Query: {user_query}"],
-                config=types.GenerateContentConfig(
-                    system_instruction=qa_instruction
-                )
+                contents=[f"Context:\n{str(all_mentions.data)}\n\nQuery: {user_query}"],
+                config=types.GenerateContentConfig(system_instruction=qa_instruction)
             )
-            
-            st.markdown("### 🤖 Assistant Answer")
             st.info(response.text)
