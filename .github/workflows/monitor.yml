@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 8 * * *'
   workflow_dispatch: 
+    inputs:
+      timeframe:
+        description: 'Timeframe for search results'
+        required: false
+        default: 'qdr:w' # Default to past week
+        type: string
 
 jobs:
   run-monitor:
@@ -17,7 +23,6 @@ jobs:
         with:
           python-version: '3.10'
 
-      # FIXED: Added google-genai alongside supabase and requests
       - name: Install dependencies
         run: |
           pip install supabase requests google-genai
@@ -28,4 +33,5 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          TIMEFRAME_INPUT: ${{ github.event.inputs.timeframe }}
         run: python fetch_mentions.py
