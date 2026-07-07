@@ -156,6 +156,10 @@ if app_mode == "📥 Inbox / Triage":
         st.info(f"Found {len(mentions)} unprocessed mention records requiring validation.")
         for m in mentions:
             with st.expander(f"🔍 {m['outlet_platform']} | {m['title']} (Published: {m['date_published']})"):
+                
+                # Dynamic AI Recommendation banner inside the triage dropdown layout[cite: 2]
+                st.info(f"🤖 **Gemini Strategic Action Recommendation:** {m.get('ai_action_recommendation', 'Monitor tracking loop index context; no critical remediation required.')}")
+                
                 col1, col2 = st.columns(2)
                 with col1:
                     st.write(f"**URL:** [Open Source]({m['url']})")
@@ -212,7 +216,7 @@ if app_mode == "📥 Inbox / Triage":
 # --- MODULE 2: REVIEWED DATABASE TABLE ---
 elif app_mode == "📋 Reviewed Database Table":
     st.subheader("📋 Reviewed Mentions Archive")
-    st.write("Use search filters to populate records. Click on any row to load its entire field metadata profile and action logs history below.")
+    st.write("Use search filters to populate records. Click on any row to load its entire field metadata profile, AI instructions, and action logs history below.")
     
     # Filter Layout Panel
     f1, f2, f3 = st.columns([2, 2, 3])
@@ -262,8 +266,10 @@ elif app_mode == "📋 Reviewed Database Table":
                 selected_row_idx = selection["selection"]["rows"][0]
                 target_record = df.iloc[selected_row_idx].to_dict()
                 
-                # --- NEW COMPREHENSIVE DATA LAYOUT VIEW ---
                 st.markdown(f"### 📄 Full Metadata Profile: `{target_record['title']}`")
+                
+                # Persistent AI Recommendation Insight carried forward to the management section layer[cite: 2]
+                st.info(f"🤖 **Gemini Strategic Action Recommendation for this Mention:** {target_record.get('ai_action_recommendation', 'Monitor tracking loop index context; no critical remediation required.')}")
                 
                 # Metadata Field Categorization Grid
                 meta_col1, meta_col2, meta_col3 = st.columns(3)
@@ -291,7 +297,6 @@ elif app_mode == "📋 Reviewed Database Table":
                     st.write(f"- **Corporate Naming Discrepancy Flag:** `{target_record['naming_error_flag']}`")
                     st.write(f"- **Outdated Data Conflict Flag:** `{target_record['data_conflict_flag']}`")
                 
-                # Content Excerpts Blocks
                 st.markdown("**📝 Text Snippet & Analytical Explanations**")
                 st.write(f"**Raw Text Excerpt Snippet:** *\"{target_record['snippet']}\"*")
                 st.write(f"**Gemini Sentiment Rationale:** *{target_record['sentiment_rationale']}*")
@@ -308,7 +313,6 @@ elif app_mode == "📋 Reviewed Database Table":
                 if not actions_res.data:
                     st.caption("No custom action notes or tracking entries logged for this profile yet.")
                 else:
-                    # Construct an explicit history table for action notes logs
                     history_df = pd.DataFrame(actions_res.data)
                     history_df = history_df.rename(columns={"inserted_at": "Timestamp", "performed_by": "User / Operator", "action_note": "Action Details / Note"})
                     st.table(history_df[["Timestamp", "User / Operator", "Action Details / Note"]])
@@ -344,7 +348,7 @@ elif app_mode == "📋 Reviewed Database Table":
                         }).eq("id", target_record['id']).execute()
                         st.rerun()
                 with m2:
-                    if st.button("🗑_ Permanent Deletion", type="secondary", key="perm_delete_btn"):
+                    if st.button("🗑️ Permanent Deletion", type="secondary", key="perm_delete_btn"):
                         delete_mention_record(target_record['id'])
                         st.rerun()
             else:
