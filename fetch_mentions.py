@@ -26,7 +26,7 @@ def analyze_quality_and_flags(text: str):
         flags["data_conflict"] = True
         flags["conflict_details"] = "Outdated sector value ($37.8B vs $43.9B cited)."
         
-    if "membership@aiacanada.ca" in text.lower():[cite: 3]
+    if "membership@aiacanada.ca" in text.lower():
         flags["data_conflict"] = True
         flags["conflict_details"] = "Outdated domain suffix used for membership email."
 
