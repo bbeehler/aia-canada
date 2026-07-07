@@ -34,6 +34,31 @@ except Exception as e:
     st.error("Initialization Error: Check your Streamlit Secrets configuration.")
     st.stop()
 
+# --- 🔐 SUPABASE AUTH / LOGIN SESSION CONTROL LAYER ---
+if "auth_user" not in st.session_state:
+    st.session_state["auth_user"] = None
+
+if st.session_state["auth_user"] is None:
+    st.markdown("<h2 style='text-align: center;'>📊 AIA Canada Media Monitor Access Portal</h2>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        with st.form("login_form"):
+            st.markdown("### Account Authentication")
+            login_email = st.text_input("Corporate Email Address")
+            login_password = st.text_input("Password", type="password")
+            submit_login = st.form_submit_button("Authenticate Sign-In", use_container_width=True)
+            
+            if submit_login:
+                try:
+                    res = supabase.auth.sign_in_with_password({"email": login_email, "password": login_password})
+                    st.session_state["auth_user"] = res.user
+                    st.success("Access authorized! Initializing platform profiles...")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as login_err:
+                    st.error(f"Authentication Failed: {login_err}")
+    st.stop()
+
 # --- DYNAMIC CONFIGURATION FACTORIES ---
 def load_active_team_users():
     try:
@@ -46,7 +71,12 @@ TEAM_USERS = load_active_team_users()
 
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
 st.sidebar.title("📊 AIA Canada Monitor")
-st.sidebar.caption("Media Tracking & Analytics Platform")
+st.sidebar.caption(f"Operator: {st.session_state['auth_user'].email}")
+
+if st.sidebar.button("🔒 Sign Out / Lock Session", use_container_width=True):
+    supabase.auth.sign_out()
+    st.session_state["auth_user"] = None
+    st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔄 Manual Data Sync")
@@ -113,7 +143,7 @@ def trigger_github_sync(tbs_val):
     except Exception as e:
         st.sidebar.error(f"Connection failed: {e}")
 
-st.sidebar.write("Force an immediate web crawl update:")
+st.sidebar.write("Force an immediate open web crawl update:")
 if st.sidebar.button("Force Fetch Mentions Now", use_container_width=True):
     with st.sidebar.spinner("Pinging GitHub Actions API..."):
         trigger_github_sync(selected_tbs)
@@ -165,7 +195,7 @@ if app_mode == "📥 Inbox / Triage":
         st.info(f"Found {len(mentions)} unprocessed mention records requiring validation.")
         for m in mentions:
             with st.expander(f"🔍 {m['outlet_platform']} | {m['title']} (Published: {m['date_published']})"):
-                st.info(f"🤖 **Gemini Strategic Action Recommendation:** {m.get('ai_action_recommendation', 'Monitor tracking loop index context; no critical remediation required.')}")
+                st.info(f"🤖 **Gemini Strategic Action Recommendation:** {m.get('ai_action_recommendation', 'N/A')}")
                 
                 col1, col2 = st.columns(2)
                 with col1:
@@ -177,7 +207,7 @@ if app_mode == "📥 Inbox / Triage":
                     st.write(f"**Inferred Sentiment:** `{m['sentiment_category']}` (Score: {m['sentiment_score']})")
                     st.write(f"**Rationale:** {m['sentiment_rationale']}")
                     if m['naming_error_flag'] or m['data_conflict_flag']:
-                        st.warning(f"⚠️ **Quality Flag Raised:** {m['data_conflict_details'] or 'Branding variation error.'}")
+                        st.warning(f"⚠️ **Flag Raised:** {m['data_conflict_details'] or 'Branding variation error.'}")
                 
                 st.markdown("---")
                 c1, c2, c3, c4 = st.columns(4)
@@ -223,7 +253,7 @@ if app_mode == "📥 Inbox / Triage":
 # --- MODULE 2: REVIEWED DATABASE TABLE ---
 elif app_mode == "📋 Reviewed Database Table":
     st.subheader("📋 Reviewed Mentions Archive")
-    st.write("Use search filters to populate records. Click on any row to load its entire field metadata profile and action logs history below.")
+    st.write("Use search filters to populate records. Click on any row to load its field profile parameters below.")
     
     f1, f2, f3 = st.columns([2, 2, 3])
     with f1:
@@ -344,12 +374,10 @@ elif app_mode == "📋 Reviewed Database Table":
                     if st.button("🗑 Permanent Deletion", type="secondary", key="perm_delete_btn"):
                         delete_mention_record(target_record['id'])
                         st.rerun()
-            else:
-                st.caption("💡 Click on any processed item row inside the tracking matrix above to reveal its parameters.")
 
 # --- MODULE 3: DAILY CRISIS CENTER ---
 elif app_mode == "🚨 Daily Crisis Center":
-    st.subheader("🚨 Template 1: Daily Crisis Alert Generator")
+    st.subheader("🚨 Daily Crisis Alert Generator")
     response = supabase.table("mentions").select("*").in_("alert_level", ["High", "Critical"]).neq("status", "resolved").execute()
     crisis_items = response.data
     
@@ -379,14 +407,12 @@ elif app_mode == "🚨 Daily Crisis Center":
 
 # --- MODULE 4: WEEKLY SUMMARIZER ---
 elif app_mode == "📝 Weekly Summarizer":
-    st.subheader("📝 Template 2: Weekly Trend Summary Engine")
-    
-    # Load custom Gemini system instructions dynamically from database configurations
+    st.subheader("📝 Weekly Trend Summary Engine")
     try:
         tmpl_res = supabase.table("monitor_templates").select("*").eq("template_name", "Weekly Trend Summary").execute()
         system_instruction = tmpl_res.data[0]["system_instruction_prompt"]
     except Exception:
-        system_instruction = "You are the senior media monitoring AI analyst for AIA Canada. Format into Template 2 using CP rules."
+        system_instruction = "You are the senior media monitoring AI analyst for AIA Canada. Format using CP rules."
 
     if st.button("Generate Weekly Trend Analysis Document", use_container_width=True):
         with st.spinner("Compiling database records for processing with Gemini..."):
@@ -413,7 +439,7 @@ elif app_mode == "💬 Database Q&A Assistant":
     if user_query:
         with st.spinner("Scanning logs..."):
             all_mentions = supabase.table("mentions").select("title, outlet_platform, theme, sentiment_category, assigned_to_user, alert_level").limit(150).execute()
-            qa_instruction = "You are an intelligent data specialist tracking brand awareness for AIA Canada. Answer using only the literal context provided."
+            qa_instruction = "You are an intelligent data specialist tracking brand awareness for AIA Canada. Answer using only context."
             response = ai_client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=[f"Context:\n{str(all_mentions.data)}\n\nQuery: {user_query}"],
@@ -421,83 +447,123 @@ elif app_mode == "💬 Database Q&A Assistant":
             )
             st.info(response.text)
 
-# --- NEW MODULE 6: SYSTEM SETTINGS DASHBOARD ---
+# --- MODULE 6: SYSTEM SETTINGS DASHBOARD ---
 elif app_mode == "⚙️ System Settings Dashboard":
     st.subheader("⚙️ System Settings & Parameter Tuning Dashboard")
-    st.write("Manage platform operations, adjust crawler scopes, assign custom roles, and fine-tune Gemini templates.")
     
-    tab_users, tab_keywords, tab_templates = st.tabs(["👥 User Roster Settings", "🔑 Search Keywords & Phrases", "📝 AI Report Prompt Templates"])
+    tab_users, tab_keywords, tab_templates = st.tabs(["👥 User Accounts & Role Permissions", "🔑 Search Keywords & Phrases", "📝 AI Report Templates"])
     
-    # 1. USER ROSTER SETTINGS
+    # 1. USER ACCOUNTS & SECURITY PROFILES
     with tab_users:
-        st.markdown("### 👥 Manage Active Platform Operators")
+        st.markdown("### 👥 Manage Active Platform Operators & Auth Credentials")
         
-        # Add User Form
-        with st.form("add_user_form", clear_on_submit=True):
-            st.markdown("**Add New Team Member**")
-            u_name = st.text_input("Full Name / Team Label", placeholder="e.g., Jean-François Champagne")
-            u_role = st.selectbox("Authorization Access Role", ["Administrator", "Editor", "Viewer"])
-            if st.form_submit_button("Register Team Member"):
-                if u_name.strip():
-                    try:
-                        supabase.table("monitor_users").insert({"full_name": u_name, "user_role": u_role}).execute()
-                        st.success(f"Successfully added {u_name} to access roster!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to add user (might be a duplicate name): {e}")
-                else:
-                    st.warning("User name cannot be empty.")
-
-        # Display and Delete User Frame
-        st.markdown("**Current Roster Members**")
-        u_res = supabase.table("monitor_users").select("*").order("full_name").execute()
-        if u_res.data:
-            u_df = pd.DataFrame(u_res.data)
-            st.dataframe(u_df[["full_name", "user_role", "inserted_at"]], use_container_width=True, hide_index=True)
+        # User Creation Deck
+        with st.form("create_user_security_form", clear_on_submit=True):
+            st.markdown("**Provision New Secured Account Profile**")
+            new_full_name = st.text_input("Full Display Name / Team Label", placeholder="e.g., Brian Beehler")
+            new_email = st.text_input("Corporate Email Address")
+            new_password = st.text_input("Initial System Password", type="password")
+            new_role = st.selectbox("Access Privilege Scope", ["Administrator", "Editor", "Viewer"])
             
-            st.markdown("**Delete a Team Member**")
-            user_to_del = st.selectbox("Select user account to terminate:", [user["full_name"] for user in u_res.data])
-            if st.button("Delete Selected User Account", type="primary"):
-                supabase.table("monitor_users").delete().eq("full_name", user_to_del).execute()
-                st.success(f"Removed account authorization for {user_to_del}.")
-                st.rerun()
+            if st.form_submit_button("Provision User Account"):
+                if new_full_name.strip() and new_email.strip() and len(new_password) >= 6:
+                    try:
+                        # 1. Secure account registration inside internal auth table
+                        auth_res = supabase.auth.admin.create_user({
+                            "email": new_email,
+                            "password": new_password,
+                            "email_confirm": True
+                        })
+                        
+                        # 2. Map account descriptors into local system meta-table
+                        supabase.table("monitor_users").insert({
+                            "user_id": auth_res.user.id,
+                            "full_name": new_full_name,
+                            "tracking_email": new_email,
+                            "user_role": new_role
+                        }).execute()
+                        
+                        st.success(f"Successfully provisioned login access for {new_full_name}!")
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Provisioning Rejected: {err} (Note: Running this locally requires using your Supabase Service Role key context, or ensuring Auth settings allow public sign-ups.)")
+                else:
+                    st.warning("All input configuration values must be filled. Passwords must be at least 6 characters.")
+
+        # Real-time Edit, Password Reset, and Deletion Deck
+        st.markdown("---")
+        st.markdown("### 🛠️ Current Active Accounts Roster Management")
+        u_res = supabase.table("monitor_users").select("*").order("full_name").execute()
+        
+        if u_res.data:
+            for current_row in u_res.data:
+                with st.expander(f"👤 {current_row['full_name']} | Role: {current_row['user_role']} ({current_row['tracking_email']})"):
+                    # Inline property modifications forms layout
+                    col_e1, col_e2 = st.columns(2)
+                    with col_e1:
+                        # Form to change role values
+                        current_role_idx = ["Administrator", "Editor", "Viewer"].index(current_row['user_role'])
+                        update_role_selection = st.selectbox("Modify Privileges Role", ["Administrator", "Editor", "Viewer"], index=current_role_idx, key=f"edit_role_select_{current_row['id']}")
+                        if st.button("Overwrite Access Role", key=f"save_role_btn_{current_row['id']}"):
+                            supabase.table("monitor_users").update({"user_role": update_role_selection}).eq("id", current_row['id']).execute()
+                            st.success("User privilege profile updated.")
+                            st.rerun()
+                            
+                    with col_e2:
+                        # Form to securely overwrite passwords
+                        overwrite_password_string = st.text_input("Overwrite Password / Force Reset", type="password", key=f"reset_pass_field_{current_row['id']}", placeholder="Type new credentials string...")
+                        if st.button("Deploy New Password Overwrite", key=f"save_pass_btn_{current_row['id']}"):
+                            if len(overwrite_password_string) >= 6:
+                                try:
+                                    supabase.auth.admin.update_user_by_id(
+                                        current_row['user_id'], 
+                                        {"password": overwrite_password_string}
+                                    )
+                                    st.success("Security authorization token string updated successfully!")
+                                except Exception as pass_err:
+                                    st.error(f"Password overwrite failed: {pass_err}")
+                            else:
+                                st.error("Password strings must be at least 6 characters.")
+                    
+                    st.markdown("---")
+                    # Full termination deployment anchor
+                    if st.button("❌ Terminate Account & Wipe Platform Data Logs", key=f"wipe_user_btn_{current_row['id']}", type="primary", use_container_width=True):
+                        try:
+                            # 1. Clean secure auth data records out of main system layers
+                            supabase.auth.admin.delete_user(current_row['user_id'])
+                        except Exception:
+                            pass # Fail-soft if metadata is out-of-sync with core cloud engine
+                        
+                        # 2. Erase user entry row from meta-tracking ledger
+                        supabase.table("monitor_users").delete().eq("id", current_row['id']).execute()
+                        st.success("Identity vectors cleared from systemic logging indexes.")
+                        st.rerun()
 
     # 2. KEYWORD MANAGEMENT LAYOUT
     with tab_keywords:
         st.markdown("### 🔑 Target Keyword Monitoring Framework")
-        st.write("Keywords added here will automatically populate the background web crawling monitoring schedules.")
-        
-        # Add Keyword Form
         with st.form("add_kw_form", clear_on_submit=True):
             st.markdown("**Add New Search Target Phrasing**")
-            k_term = st.text_input("Exact Search Query Word/Phrase", placeholder="e.g., AIA Canada Right to Repair")
-            k_brands = st.text_input("Associated Impact Brands (Comma Separated)", placeholder="e.g., AIA Canada, CCIF")
-            k_theme = st.text_input("Theme Layer Category", placeholder="e.g., Government Relations Legislation")
+            k_term = st.text_input("Exact Search Query Word/Phrase", placeholder="e.g., AIA Canada Legislation")
+            k_brands = st.text_input("Associated Impact Brands (Comma Separated)", placeholder="e.g., AIA Canada")
+            k_theme = st.text_input("Theme Layer Category", placeholder="e.g., Government Relations")
             
             if st.form_submit_button("Commit Query to Search Engine Index"):
                 if k_term.strip():
                     brand_list = [b.strip() for b in k_brands.split(",") if b.strip()]
                     try:
-                        supabase.table("monitor_keywords").insert({
-                            "term": k_term,
-                            "brand_tags": brand_list,
-                            "theme_layer": k_theme
-                        }).execute()
-                        st.success(f"Logged search query target phrase: '{k_term}'")
+                        supabase.table("monitor_keywords").insert({"term": k_term, "brand_tags": brand_list, "theme_layer": k_theme}).execute()
+                        st.success(f"Logged search query phrase: '{k_term}'")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to index tracking term: {e}")
-                else:
-                    st.warning("Tracking term cannot be empty.")
 
-        # Display and Delete Keywords
         st.markdown("**Active Scraped Keywords Index Matrix**")
         k_res = supabase.table("monitor_keywords").select("*").order("term").execute()
         if k_res.data:
             k_df = pd.DataFrame(k_res.data)
             st.dataframe(k_df[["term", "brand_tags", "theme_layer"]], use_container_width=True, hide_index=True)
             
-            st.markdown("**Remove Search Query Phrase**")
             kw_to_del = st.selectbox("Select tracking query to delete:", [kw["term"] for kw in k_res.data])
             if st.button("Permanently Remove Term From Scraper", type="primary"):
                 supabase.table("monitor_keywords").delete().eq("term", kw_to_del).execute()
@@ -507,26 +573,16 @@ elif app_mode == "⚙️ System Settings Dashboard":
     # 3. AI REPORT PROMPT TEMPLATE EDITOR
     with tab_templates:
         st.markdown("### 📝 AI Generation System Report Prompt Templates")
-        st.write("Tune and adjust the specialized markdown layout rules and constraints that Gemini uses to generate automated corporate intelligence reports.")
-        
         t_res = supabase.table("monitor_templates").select("*").order("template_name").execute()
         
         if t_res.data:
             selected_tmpl_name = st.selectbox("Select a report template config to edit:", [t["template_name"] for t in t_res.data])
             current_tmpl = next(t for t in t_res.data if t["template_name"] == selected_tmpl_name)
             
-            # Edit Workspace Area
             with st.form("edit_tmpl_form"):
                 st.write(f"Editing Prompt Architecture for: **{selected_tmpl_name}**")
-                updated_prompt_text = st.text_area(
-                    "Gemini System Instruction Matrix Guidance Prompt", 
-                    value=current_tmpl["system_instruction_prompt"], 
-                    height=300
-                )
-                
+                updated_prompt_text = st.text_area("Gemini System Instruction Matrix Guidance Prompt", value=current_tmpl["system_instruction_prompt"], height=300)
                 if st.form_submit_button("Overwrite System Prompt Template Details"):
-                    supabase.table("monitor_templates").update({
-                        "system_instruction_prompt": updated_prompt_text
-                    }).eq("template_name", selected_tmpl_name).execute()
-                    st.success("Successfully synchronized and deployed updated AI system prompt configurations!")
+                    supabase.table("monitor_templates").update({"system_instruction_prompt": updated_prompt_text}).eq("template_name", selected_tmpl_name).execute()
+                    st.success("AI prompt configuration successfully updated!")
                     st.rerun()
