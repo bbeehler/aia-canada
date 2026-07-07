@@ -34,7 +34,15 @@ except Exception as e:
     st.error("Initialization Error: Check your Streamlit Secrets configuration.")
     st.stop()
 
-TEAM_USERS = ["Unassigned", "Brian Beehler", "Emily Chung", "Jean-François Champagne", "Communications Team"]
+# --- DYNAMIC CONFIGURATION FACTORIES ---
+def load_active_team_users():
+    try:
+        res = supabase.table("monitor_users").select("full_name").order("full_name").execute()
+        return ["Unassigned"] + [row["full_name"] for row in res.data]
+    except Exception:
+        return ["Unassigned", "Brian Beehler", "Emily Chung"]
+
+TEAM_USERS = load_active_team_users()
 
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
 st.sidebar.title("📊 AIA Canada Monitor")
@@ -118,7 +126,8 @@ app_mode = st.sidebar.radio(
         "📋 Reviewed Database Table", 
         "🚨 Daily Crisis Center", 
         "📝 Weekly Summarizer", 
-        "💬 Database Q&A Assistant"
+        "💬 Database Q&A Assistant",
+        "⚙️ System Settings Dashboard"
     ]
 )
 
@@ -156,8 +165,6 @@ if app_mode == "📥 Inbox / Triage":
         st.info(f"Found {len(mentions)} unprocessed mention records requiring validation.")
         for m in mentions:
             with st.expander(f"🔍 {m['outlet_platform']} | {m['title']} (Published: {m['date_published']})"):
-                
-                # Dynamic AI Recommendation banner inside the triage dropdown layout[cite: 2]
                 st.info(f"🤖 **Gemini Strategic Action Recommendation:** {m.get('ai_action_recommendation', 'Monitor tracking loop index context; no critical remediation required.')}")
                 
                 col1, col2 = st.columns(2)
@@ -170,7 +177,7 @@ if app_mode == "📥 Inbox / Triage":
                     st.write(f"**Inferred Sentiment:** `{m['sentiment_category']}` (Score: {m['sentiment_score']})")
                     st.write(f"**Rationale:** {m['sentiment_rationale']}")
                     if m['naming_error_flag'] or m['data_conflict_flag']:
-                        st.warning(f"⚠️ **Flag Raised:** {m['data_conflict_details'] or 'Branding variation error.'}")
+                        st.warning(f"⚠️ **Quality Flag Raised:** {m['data_conflict_details'] or 'Branding variation error.'}")
                 
                 st.markdown("---")
                 c1, c2, c3, c4 = st.columns(4)
@@ -216,9 +223,8 @@ if app_mode == "📥 Inbox / Triage":
 # --- MODULE 2: REVIEWED DATABASE TABLE ---
 elif app_mode == "📋 Reviewed Database Table":
     st.subheader("📋 Reviewed Mentions Archive")
-    st.write("Use search filters to populate records. Click on any row to load its entire field metadata profile, AI instructions, and action logs history below.")
+    st.write("Use search filters to populate records. Click on any row to load its entire field metadata profile and action logs history below.")
     
-    # Filter Layout Panel
     f1, f2, f3 = st.columns([2, 2, 3])
     with f1:
         start_date = st.date_input("Start Date", datetime.now().date() - timedelta(days=7))
@@ -239,7 +245,6 @@ elif app_mode == "📋 Reviewed Database Table":
         st.info("No reviewed tracking logs match the specified parameters.")
     else:
         df = pd.DataFrame(reviewed_data)
-        
         if search_kw:
             df = df[df['title'].str.contains(search_kw, case=False, na=False) | df['snippet'].str.contains(search_kw, case=False, na=False)]
             
@@ -267,18 +272,14 @@ elif app_mode == "📋 Reviewed Database Table":
                 target_record = df.iloc[selected_row_idx].to_dict()
                 
                 st.markdown(f"### 📄 Full Metadata Profile: `{target_record['title']}`")
+                st.info(f"🤖 **Gemini Strategic Action Recommendation for this Mention:** {target_record.get('ai_action_recommendation', 'N/A')}")
                 
-                # Persistent AI Recommendation Insight carried forward to the management section layer[cite: 2]
-                st.info(f"🤖 **Gemini Strategic Action Recommendation for this Mention:** {target_record.get('ai_action_recommendation', 'Monitor tracking loop index context; no critical remediation required.')}")
-                
-                # Metadata Field Categorization Grid
                 meta_col1, meta_col2, meta_col3 = st.columns(3)
                 with meta_col1:
                     st.markdown("**📌 Core Tracking Identifiers**")
                     st.write(f"- **Database ID (UUID):** `{target_record['id']}`")
                     st.write(f"- **System Insertion Timestamp:** `{target_record['inserted_at']}`")
                     st.write(f"- **Official Publication Date:** `{target_record['date_published']}`")
-                    st.write(f"- **Outlet / Resource Platform:** `{target_record['outlet_platform']}`")
                     st.write(f"- **Direct Source URL:** [Open Live Web Link]({target_record['url']})")
                 
                 with meta_col2:
@@ -294,30 +295,22 @@ elif app_mode == "📋 Reviewed Database Table":
                     st.write(f"- **Inferred Tone Category:** `{target_record['sentiment_category']}`")
                     st.write(f"- **Sentiment Intensity Score (-1.0 to 1.0):** `{target_record['sentiment_score']}`")
                     st.write(f"- **Action Recommendation Strategy:** `{target_record['recommendation']}`")
-                    st.write(f"- **Corporate Naming Discrepancy Flag:** `{target_record['naming_error_flag']}`")
-                    st.write(f"- **Outdated Data Conflict Flag:** `{target_record['data_conflict_flag']}`")
                 
                 st.markdown("**📝 Text Snippet & Analytical Explanations**")
                 st.write(f"**Raw Text Excerpt Snippet:** *\"{target_record['snippet']}\"*")
                 st.write(f"**Gemini Sentiment Rationale:** *{target_record['sentiment_rationale']}*")
                 
-                if target_record['data_conflict_flag'] or target_record['naming_error_flag']:
-                    st.error(f"⚠️ **Logged Quality Control Conflict Details:** {target_record['data_conflict_details'] or 'Incorrect brand proper noun variant encountered.'}")
-                
                 st.markdown("---")
-                
-                # Chronological Action Log History Frame
                 st.markdown("#### 📜 Actions Taken & Notes History Trail")
                 actions_res = supabase.table("mention_actions").select("*").eq("mention_id", target_record['id']).order("inserted_at", desc=True).execute()
                 
                 if not actions_res.data:
-                    st.caption("No custom action notes or tracking entries logged for this profile yet.")
+                    st.caption("No custom action notes logged for this profile yet.")
                 else:
                     history_df = pd.DataFrame(actions_res.data)
-                    history_df = history_df.rename(columns={"inserted_at": "Timestamp", "performed_by": "User / Operator", "action_note": "Action Details / Note"})
-                    st.table(history_df[["Timestamp", "User / Operator", "Action Details / Note"]])
+                    history_df = history_df.rename(columns={"inserted_at": "Timestamp", "performed_by": "User", "action_note": "Action Details"})
+                    st.table(history_df[["Timestamp", "User", "Action Details"]])
                 
-                # Modification forms panel
                 st.markdown("#### ✏️ Update Classification & Append New Action Log")
                 e1, e2, e3, e4 = st.columns(4)
                 with e1:
@@ -333,7 +326,7 @@ elif app_mode == "📋 Reviewed Database Table":
                     current_user = target_record['assigned_to_user'] if target_record['assigned_to_user'] in TEAM_USERS else "Unassigned"
                     edit_user = st.selectbox("Reassign Owner", TEAM_USERS, index=TEAM_USERS.index(current_user), key="edit_user")
                     
-                edit_note = st.text_input("Type new action note to append to history trail:", placeholder="e.g., Sent holding statement draft to Emily Chung via email...", key="edit_note_input")
+                edit_note = st.text_input("Type new action note to append to history trail:", key="edit_note_input")
                 
                 m1, m2 = st.columns([1, 4])
                 with m1:
@@ -348,13 +341,13 @@ elif app_mode == "📋 Reviewed Database Table":
                         }).eq("id", target_record['id']).execute()
                         st.rerun()
                 with m2:
-                    if st.button("🗑️ Permanent Deletion", type="secondary", key="perm_delete_btn"):
+                    if st.button("🗑 Permanent Deletion", type="secondary", key="perm_delete_btn"):
                         delete_mention_record(target_record['id'])
                         st.rerun()
             else:
-                st.caption("💡 Click on any processed item row inside the tracking matrix above to reveal all profile database fields, read history logs, or make record adjustments.")
+                st.caption("💡 Click on any processed item row inside the tracking matrix above to reveal its parameters.")
 
-# --- MODULE 4: DAILY CRISIS CENTER ---
+# --- MODULE 3: DAILY CRISIS CENTER ---
 elif app_mode == "🚨 Daily Crisis Center":
     st.subheader("🚨 Template 1: Daily Crisis Alert Generator")
     response = supabase.table("mentions").select("*").in_("alert_level", ["High", "Critical"]).neq("status", "resolved").execute()
@@ -384,16 +377,23 @@ elif app_mode == "🚨 Daily Crisis Center":
 """
         st.text_area("Markdown Summary Text Content", markdown_body, height=300)
 
-# --- MODULE 5: WEEKLY SUMMARIZER ---
+# --- MODULE 4: WEEKLY SUMMARIZER ---
 elif app_mode == "📝 Weekly Summarizer":
     st.subheader("📝 Template 2: Weekly Trend Summary Engine")
+    
+    # Load custom Gemini system instructions dynamically from database configurations
+    try:
+        tmpl_res = supabase.table("monitor_templates").select("*").eq("template_name", "Weekly Trend Summary").execute()
+        system_instruction = tmpl_res.data[0]["system_instruction_prompt"]
+    except Exception:
+        system_instruction = "You are the senior media monitoring AI analyst for AIA Canada. Format into Template 2 using CP rules."
+
     if st.button("Generate Weekly Trend Analysis Document", use_container_width=True):
         with st.spinner("Compiling database records for processing with Gemini..."):
             raw_data = supabase.table("mentions").select("*").neq("status", "pending").limit(100).execute()
             if not raw_data.data:
-                st.warning("No validated tracking records were discovered within the data tables to analyze.")
+                st.warning("No validated tracking records discovered.")
             else:
-                system_instruction = "You are the senior media monitoring AI analyst for AIA Canada. Format into Template 2 (Weekly Summary) using CP spelling rules."
                 response = ai_client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=[f"Logs: {str(raw_data.data)}"],
@@ -405,7 +405,7 @@ elif app_mode == "📝 Weekly Summarizer":
     if "latest_weekly_report" in st.session_state:
         st.markdown(st.session_state["latest_weekly_report"])
 
-# --- MODULE 6: DATABASE Q&A ASSISTANT ---
+# --- MODULE 5: DATABASE Q&A ASSISTANT ---
 elif app_mode == "💬 Database Q&A Assistant":
     st.subheader("💬 Ask Your Media Monitoring Database")
     user_query = st.text_input("Enter your tracking question:", placeholder="Ask about trends, owners, or entries...")
@@ -420,3 +420,113 @@ elif app_mode == "💬 Database Q&A Assistant":
                 config=types.GenerateContentConfig(system_instruction=qa_instruction)
             )
             st.info(response.text)
+
+# --- NEW MODULE 6: SYSTEM SETTINGS DASHBOARD ---
+elif app_mode == "⚙️ System Settings Dashboard":
+    st.subheader("⚙️ System Settings & Parameter Tuning Dashboard")
+    st.write("Manage platform operations, adjust crawler scopes, assign custom roles, and fine-tune Gemini templates.")
+    
+    tab_users, tab_keywords, tab_templates = st.tabs(["👥 User Roster Settings", "🔑 Search Keywords & Phrases", "📝 AI Report Prompt Templates"])
+    
+    # 1. USER ROSTER SETTINGS
+    with tab_users:
+        st.markdown("### 👥 Manage Active Platform Operators")
+        
+        # Add User Form
+        with st.form("add_user_form", clear_on_submit=True):
+            st.markdown("**Add New Team Member**")
+            u_name = st.text_input("Full Name / Team Label", placeholder="e.g., Jean-François Champagne")
+            u_role = st.selectbox("Authorization Access Role", ["Administrator", "Editor", "Viewer"])
+            if st.form_submit_button("Register Team Member"):
+                if u_name.strip():
+                    try:
+                        supabase.table("monitor_users").insert({"full_name": u_name, "user_role": u_role}).execute()
+                        st.success(f"Successfully added {u_name} to access roster!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to add user (might be a duplicate name): {e}")
+                else:
+                    st.warning("User name cannot be empty.")
+
+        # Display and Delete User Frame
+        st.markdown("**Current Roster Members**")
+        u_res = supabase.table("monitor_users").select("*").order("full_name").execute()
+        if u_res.data:
+            u_df = pd.DataFrame(u_res.data)
+            st.dataframe(u_df[["full_name", "user_role", "inserted_at"]], use_container_width=True, hide_index=True)
+            
+            st.markdown("**Delete a Team Member**")
+            user_to_del = st.selectbox("Select user account to terminate:", [user["full_name"] for user in u_res.data])
+            if st.button("Delete Selected User Account", type="primary"):
+                supabase.table("monitor_users").delete().eq("full_name", user_to_del).execute()
+                st.success(f"Removed account authorization for {user_to_del}.")
+                st.rerun()
+
+    # 2. KEYWORD MANAGEMENT LAYOUT
+    with tab_keywords:
+        st.markdown("### 🔑 Target Keyword Monitoring Framework")
+        st.write("Keywords added here will automatically populate the background web crawling monitoring schedules.")
+        
+        # Add Keyword Form
+        with st.form("add_kw_form", clear_on_submit=True):
+            st.markdown("**Add New Search Target Phrasing**")
+            k_term = st.text_input("Exact Search Query Word/Phrase", placeholder="e.g., AIA Canada Right to Repair")
+            k_brands = st.text_input("Associated Impact Brands (Comma Separated)", placeholder="e.g., AIA Canada, CCIF")
+            k_theme = st.text_input("Theme Layer Category", placeholder="e.g., Government Relations Legislation")
+            
+            if st.form_submit_button("Commit Query to Search Engine Index"):
+                if k_term.strip():
+                    brand_list = [b.strip() for b in k_brands.split(",") if b.strip()]
+                    try:
+                        supabase.table("monitor_keywords").insert({
+                            "term": k_term,
+                            "brand_tags": brand_list,
+                            "theme_layer": k_theme
+                        }).execute()
+                        st.success(f"Logged search query target phrase: '{k_term}'")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to index tracking term: {e}")
+                else:
+                    st.warning("Tracking term cannot be empty.")
+
+        # Display and Delete Keywords
+        st.markdown("**Active Scraped Keywords Index Matrix**")
+        k_res = supabase.table("monitor_keywords").select("*").order("term").execute()
+        if k_res.data:
+            k_df = pd.DataFrame(k_res.data)
+            st.dataframe(k_df[["term", "brand_tags", "theme_layer"]], use_container_width=True, hide_index=True)
+            
+            st.markdown("**Remove Search Query Phrase**")
+            kw_to_del = st.selectbox("Select tracking query to delete:", [kw["term"] for kw in k_res.data])
+            if st.button("Permanently Remove Term From Scraper", type="primary"):
+                supabase.table("monitor_keywords").delete().eq("term", kw_to_del).execute()
+                st.success(f"Removed target query sequence: '{kw_to_del}'")
+                st.rerun()
+
+    # 3. AI REPORT PROMPT TEMPLATE EDITOR
+    with tab_templates:
+        st.markdown("### 📝 AI Generation System Report Prompt Templates")
+        st.write("Tune and adjust the specialized markdown layout rules and constraints that Gemini uses to generate automated corporate intelligence reports.")
+        
+        t_res = supabase.table("monitor_templates").select("*").order("template_name").execute()
+        
+        if t_res.data:
+            selected_tmpl_name = st.selectbox("Select a report template config to edit:", [t["template_name"] for t in t_res.data])
+            current_tmpl = next(t for t in t_res.data if t["template_name"] == selected_tmpl_name)
+            
+            # Edit Workspace Area
+            with st.form("edit_tmpl_form"):
+                st.write(f"Editing Prompt Architecture for: **{selected_tmpl_name}**")
+                updated_prompt_text = st.text_area(
+                    "Gemini System Instruction Matrix Guidance Prompt", 
+                    value=current_tmpl["system_instruction_prompt"], 
+                    height=300
+                )
+                
+                if st.form_submit_button("Overwrite System Prompt Template Details"):
+                    supabase.table("monitor_templates").update({
+                        "system_instruction_prompt": updated_prompt_text
+                    }).eq("template_name", selected_tmpl_name).execute()
+                    st.success("Successfully synchronized and deployed updated AI system prompt configurations!")
+                    st.rerun()
