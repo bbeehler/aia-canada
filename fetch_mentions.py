@@ -100,31 +100,34 @@ def process_and_save_mention(live_item, keyword_meta):
         print(f"Database insertion error for '{title}': {e}")
 
 if __name__ == "__main__":
-    print(f"Beginning crawl utilizing timeframe configuration: {chosen_timeframe}")
+    print("Automation engine initialized. Fetching live parameters from Supabase...")
 
-    target_keywords = [
-        {"term": "AIA Canada", "brand": ["AIA Canada"], "theme": "Core Brand Tracking"},
-        {"term": "Automotive Industries Association of Canada", "brand": ["AIA Canada"], "theme": "Core Brand Tracking"},
-        {"term": "CCIF", "brand": ["CCIF"], "theme": "Collision Sector Forums"},
-        {"term": "I-CAR Canada", "brand": ["I-CAR Canada"], "theme": "Skilled Trades Training"},
-        {"term": "Young Professionals Auto Care", "brand": ["YPA"], "theme": "Youth Engagement"},
-        {"term": "righttorepair.ca", "brand": ["AIA Canada"], "theme": "Right to Repair Campaign"}
-    ]
+    # Query dynamic user-defined keyword targets from database row records
+    try:
+        kw_response = supabase.table("monitor_keywords").select("*").execute()
+        target_keywords = kw_response.data
+    except Exception as e:
+        print(f"Failed to query database keywords: {e}")
+        target_keywords = []
+
+    if not target_keywords:
+        print("No active tracking keywords discovered in configuration tables. Terminating sweep.")
+        exit(0)
 
     for kw in target_keywords:
+        # term, brand_tags, and theme_layer are loaded straight from the database row entries
         query_string = f"{kw['term']} -site:aiacanada.com -site:ccif.ca -site:i-car.ca -site:righttorepair.ca"
         url = "https://google.serper.dev/search"
         
-        # 'tbs' maps time parameters (e.g., qdr:d = past 24 hours, qdr:w = past week, qdr:m = past month)
-        payload = {"q": query_string, "num": 5, "tbs": chosen_timeframe}
+        payload = {"q": query_string, "num": 5}
         headers = {'X-API-KEY': os.environ.get("SERPER_API_KEY"), 'Content-Type': 'application/json'}
         
         try:
             res = requests.post(url, headers=headers, json=payload)
             if res.status_code == 200:
                 for mention in res.json().get("organic", []):
-                    # Cache bypass for testing flexibility
-                    mention["link"] = mention.get("link", "") + f"?t={datetime.now().timestamp()}"
-                    process_and_save_mention(mention, kw)
+                    # Package metadata variables using database list keys
+                    kw_meta = {"brand": kw["brand_tags"], "theme": kw["theme_layer"]}
+                    process_and_save_mention(mention, kw_meta)
         except Exception as e:
-            print(f"Search failure: {e}")
+            print(f"Crawl failure for phrase '{kw['term']}': {e}")
