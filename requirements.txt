@@ -4,3 +4,4 @@ pandas
 google-genai
 requests
 openpyxl
+dateparser
