@@ -15,20 +15,20 @@ def analyze_quality_and_flags(text: str):
     
     # 1. Naming Risks Checks
     # Flags incorrect brand variants explicitly outlined in guidelines
-    incorrect_variants = ["JPMS", "AIA alone", "AIAC", "Forum canadien de l'industrie de la collision"][cite: 3]
+    incorrect_variants = ["JPMS", "AIA alone", "AIAC", "Forum canadien de l'industrie de la collision"]
     for variant in incorrect_variants:
         if variant.lower() in text.lower():
             flags["naming_error"] = True
             
     # 2. Data Conflict Checks
     # Flags specific core value and contact discrepancies
-    if "$37.8 billion" in text or "$37.8B" in text.upper():[cite: 3, 4]
+    if "$37.8 billion" in text or "$37.8B" in text.upper():
         flags["data_conflict"] = True
-        flags["conflict_details"] = "Outdated sector value ($37.8B vs $43.9B cited)."[cite: 3, 4]
+        flags["conflict_details"] = "Outdated sector value ($37.8B vs $43.9B cited)."
         
     if "membership@aiacanada.ca" in text.lower():[cite: 3]
         flags["data_conflict"] = True
-        flags["conflict_details"] = "Outdated domain suffix used for membership email."[cite: 3]
+        flags["conflict_details"] = "Outdated domain suffix used for membership email."
 
     return flags
 
