@@ -68,8 +68,11 @@ def process_and_save_mention(live_item, keyword_meta):
     snippet = live_item.get("snippet", "")
     source_platform = live_item.get("source", "Web Resource")
     
+    # 1. Quality Assurance inspection
     flags = analyze_quality_and_flags(title + " " + snippet)
-    category, score, rationale = compute_live_sentiment_with_gemini(title, snippet)
+    
+    # 2. Extract metrics AND the new AI recommendation column text
+    category, score, rationale, ai_rec = compute_live_sentiment_with_gemini(title, snippet)
     
     payload = {
         "title": title,
@@ -82,16 +85,19 @@ def process_and_save_mention(live_item, keyword_meta):
         "sentiment_category": category,
         "sentiment_score": score,
         "sentiment_rationale": rationale,
+        "ai_action_recommendation": ai_rec,  # <-- CRUCIAL: Make sure this exactly matches your new DB column
         "naming_error_flag": flags["naming_error"],
         "data_conflict_flag": flags["data_conflict"],
         "data_conflict_details": flags["conflict_details"],
         "status": "pending"
     }
+    
     try:
         supabase.table("mentions").insert(payload).execute()
-        print(f"Logged: {title}")
-    except Exception:
-        print("Duplicate or restricted row skipped.")
+        print(f"Successfully logged mention: {title}")
+    except Exception as e:
+        # Changed this print line to reveal the ACTUAL error if database rejects it
+        print(f"Database insertion error for '{title}': {e}")
 
 if __name__ == "__main__":
     print(f"Beginning crawl utilizing timeframe configuration: {chosen_timeframe}")
