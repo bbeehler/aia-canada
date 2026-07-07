@@ -4,6 +4,8 @@ import requests
 from supabase import create_client
 from google import genai
 from google.genai import types
+import dateparser
+from datetime import datetime
 
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
@@ -68,24 +70,34 @@ def process_and_save_mention(live_item, keyword_meta):
     snippet = live_item.get("snippet", "")
     source_platform = live_item.get("source", "Web Resource")
     
-    # 1. Quality Assurance inspection
-    flags = analyze_quality_and_flags(title + " " + snippet)
+    # Extract Google Serper's raw publication date attribute text string
+    raw_date_string = live_item.get("date") 
     
-    # 2. Extract metrics AND the new AI recommendation column text
+    # Parse relative phrasing like "3 hours ago" or "Yesterday" into an explicit date object
+    if raw_date_string:
+        parsed_date = dateparser.parse(
+            raw_date_string, 
+            settings={'RELATIVE_BASE': datetime.now()}
+        )
+        date_published = parsed_date.date().isoformat() if parsed_date else datetime.now().date().isoformat()
+    else:
+        date_published = datetime.now().date().isoformat()
+        
+    flags = analyze_quality_and_flags(title + " " + snippet)
     category, score, rationale, ai_rec = compute_live_sentiment_with_gemini(title, snippet)
     
     payload = {
         "title": title,
         "url": url_link,
         "outlet_platform": source_platform,
-        "date_published": datetime.now().date().isoformat(),
+        "date_published": date_published,  # <-- Storing the literal parsed publication date
         "snippet": snippet,
         "brands_affected": keyword_meta['brand'], 
         "theme": keyword_meta['theme'],
         "sentiment_category": category,
         "sentiment_score": score,
         "sentiment_rationale": rationale,
-        "ai_action_recommendation": ai_rec,  # <-- CRUCIAL: Make sure this exactly matches your new DB column
+        "ai_action_recommendation": ai_rec,
         "naming_error_flag": flags["naming_error"],
         "data_conflict_flag": flags["data_conflict"],
         "data_conflict_details": flags["conflict_details"],
@@ -94,10 +106,9 @@ def process_and_save_mention(live_item, keyword_meta):
     
     try:
         supabase.table("mentions").insert(payload).execute()
-        print(f"Successfully logged mention: {title}")
+        print(f"Successfully logged mention: {title} (Published: {date_published})")
     except Exception as e:
-        # Changed this print line to reveal the ACTUAL error if database rejects it
-        print(f"Database insertion error for '{title}': {e}")
+        print(f"Database insertion error: {e}")
 
 if __name__ == "__main__":
     print("Automation engine initialized. Fetching live parameters from Supabase...")
