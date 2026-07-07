@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import os
 import time
+from datetime import datetime, timedelta
 from supabase import create_client, Client
 from google import genai
 from google.genai import types
@@ -33,7 +34,6 @@ except Exception as e:
     st.error("Initialization Error: Check your Streamlit Secrets configuration.")
     st.stop()
 
-# Mock Team List for assignment routing (Replace with your actual team emails/names if using Supabase Auth)
 TEAM_USERS = ["Unassigned", "Brian Beehler", "Emily Chung", "Jean-François Champagne", "Communications Team"]
 
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
@@ -153,7 +153,7 @@ if app_mode == "📥 Inbox / Triage":
     if not mentions:
         st.success("All caught up! No pending un-triaged mentions found in the queue.")
     else:
-        st.info(f"Found {len(mentions)} unprocessed mention records requiring verification.")
+        st.info(f"Found {len(mentions)} unprocessed mention records requiring validation.")
         for m in mentions:
             with st.expander(f"🔍 {m['outlet_platform']} | {m['title']} (Published: {m['date_published']})"):
                 col1, col2 = st.columns(2)
@@ -169,7 +169,6 @@ if app_mode == "📥 Inbox / Triage":
                         st.warning(f"⚠️ **Flag Raised:** {m['data_conflict_details'] or 'Branding variation error.'}")
                 
                 st.markdown("---")
-                # Dropdown settings row
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
                     new_rec = st.selectbox("Assign Action Item", ["monitor only", "engage", "share", "ignore"], index=0, key=f"rec_{m['id']}")
@@ -180,7 +179,6 @@ if app_mode == "📥 Inbox / Triage":
                 with c4:
                     escalation_target = st.selectbox("If Escalated, Route to", TEAM_USERS, key=f"esc_{m['id']}")
                 
-                # Active Notes / Action Logger Section
                 note_text = st.text_input("Log Action Taken / Progress Note:", key=f"note_input_{m['id']}", placeholder="Type out workflow changes or notes here...")
                 
                 st.markdown("---")
@@ -188,8 +186,6 @@ if app_mode == "📥 Inbox / Triage":
                 with b1:
                     if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True):
                         determined_status = "escalated" if new_level in ["High", "Critical"] else "logged"
-                        
-                        # Save the tracking notes text if provided
                         if note_text.strip():
                             add_action_note(m['id'], f"Initial Triage Note: {note_text}", assignee)
                         
@@ -202,7 +198,6 @@ if app_mode == "📥 Inbox / Triage":
                         }).eq("id", m['id']).execute()
                         st.rerun()
                 with b2:
-                    # Individual Note Commit button without closing triage loop
                     if st.button("Add Progress Note Only", key=f"note_btn_{m['id']}", use_container_width=True):
                         if note_text.strip():
                             add_action_note(m['id'], note_text, assignee)
@@ -217,77 +212,111 @@ if app_mode == "📥 Inbox / Triage":
 # --- MODULE 2: REVIEWED DATABASE TABLE ---
 elif app_mode == "📋 Reviewed Database Table":
     st.subheader("📋 Reviewed Mentions Archive")
-    st.write("View, manage notes, re-assign users, edit properties, or delete processed records.")
+    st.write("Use search filters to populate records. Click on any row to load it into the management pane below.")
     
-    response = supabase.table("mentions").select("*").neq("status", "pending").order("inserted_at", desc=True).execute()
+    # Filter Layout Panel
+    f1, f2, f3 = st.columns([2, 2, 3])
+    with f1:
+        start_date = st.date_input("Start Date", datetime.now().date() - timedelta(days=7))
+    with f2:
+        end_date = st.date_input("End Date", datetime.now().date())
+    with f3:
+        search_kw = st.text_input("Search Title or Snippet Keyword", placeholder="Type a term...")
+    
+    # Query database based on user date parameters
+    response = supabase.table("mentions")\
+        .select("*")\
+        .neq("status", "pending")\
+        .gte("date_published", start_date.isoformat())\
+        .lte("date_published", end_date.isoformat())\
+        .order("inserted_at", desc=True).execute()
     reviewed_data = response.data
     
     if not reviewed_data:
-        st.info("No reviewed tracking logs discovered inside archived index tables.")
+        st.info("No reviewed tracking logs match the specified parameters.")
     else:
         df = pd.DataFrame(reviewed_data)
-        display_columns = [
-            "date_published", "outlet_platform", "title", "theme", 
-            "sentiment_category", "sentiment_score", "alert_level", "status", "assigned_to_user", "escalated_to_user", "recommendation"
-        ]
-        st.dataframe(df[display_columns], use_container_width=True, hide_index=True)
         
-        st.markdown("---")
-        st.subheader("🛠️ Active Record Management & Notes Editor")
-        
-        select_to_edit = st.selectbox(
-            "Select a specific record to examine notes, edit, or delete:", 
-            [r['title'] for r in reviewed_data]
-        )
-        target_record = next(r for r in reviewed_data if r['title'] == select_to_edit)
-        
-        # Display chronological action logs from associated tracking sub-table
-        st.markdown("#### 📜 Action Logs & User Notes Trail")
-        actions_res = supabase.table("mention_actions").select("*").eq("mention_id", target_record['id']).order("inserted_at", desc=True).execute()
-        
-        if not actions_res.data:
-            st.caption("No custom action notes recorded for this item yet.")
-        else:
-            for act in actions_res.data:
-                st.caption(f"⏱️ **{act['inserted_at']}** by **{act['performed_by'] or 'System'}**")
-                st.info(act['action_note'])
-        
-        # Row modification forms block
-        st.markdown("#### ✏️ Modify Properties")
-        e1, e2, e3, e4 = st.columns(4)
-        with e1:
-            current_rec_idx = ["monitor only", "engage", "share", "ignore"].index(target_record['recommendation']) if target_record['recommendation'] in ["monitor only", "engage", "share", "ignore"] else 0
-            edit_rec = st.selectbox("Action Recommendation", ["monitor only", "engage", "share", "ignore"], index=current_rec_idx)
-        with e2:
-            current_lvl_idx = ["Low", "Medium", "High", "Critical"].index(target_record['alert_level']) if target_record['alert_level'] in ["Low", "Medium", "High", "Critical"] else 0
-            edit_lvl = st.selectbox("Severity Framework", ["Low", "Medium", "High", "Critical"], index=current_lvl_idx)
-        with e3:
-            current_stat_idx = ["logged", "escalated", "resolved"].index(target_record['status']) if target_record['status'] in ["logged", "escalated", "resolved"] else 0
-            edit_stat = st.selectbox("Workflow State", ["logged", "escalated", "resolved"], index=current_stat_idx)
-        with e4:
-            current_user = target_record['assigned_to_user'] if target_record['assigned_to_user'] in TEAM_USERS else "Unassigned"
-            edit_user = st.selectbox("Reassign Owner", TEAM_USERS, index=TEAM_USERS.index(current_user))
+        # Apply local keyword search if requested
+        if search_kw:
+            df = df[df['title'].str.contains(search_kw, case=False, na=False) | df['snippet'].str.contains(search_kw, case=False, na=False)]
             
-        edit_note = st.text_input("Append New Action Note:", placeholder="Log actions taken or progress adjustments here...")
-        
-        m1, m2 = st.columns([1, 4])
-        with m1:
-            if st.button("Save Changes", type="primary", use_container_width=True):
-                if edit_note.strip():
-                    add_action_note(target_record['id'], edit_note, edit_user)
-                supabase.table("mentions").update({
-                    "recommendation": edit_rec,
-                    "alert_level": edit_lvl,
-                    "status": edit_stat,
-                    "assigned_to_user": edit_user if edit_user != "Unassigned" else None
-                }).eq("id", target_record['id']).execute()
-                st.rerun()
-        with m2:
-            if st.button("🗑️ Delete Record Completely", type="secondary"):
-                delete_mention_record(target_record['id'])
-                st.rerun()
+        if df.empty:
+            st.warning("No records found matching that keyword combination.")
+        else:
+            display_columns = [
+                "date_published", "outlet_platform", "title", "theme", 
+                "sentiment_category", "sentiment_score", "alert_level", "status", "assigned_to_user", "escalated_to_user", "recommendation"
+            ]
+            
+            # Interactive row selection using dataframe native parameters
+            selection = st.dataframe(
+                df[display_columns], 
+                use_container_width=True, 
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row"
+            )
+            
+            st.markdown("---")
+            st.subheader("🛠️ Active Record Management & Notes Editor")
+            
+            # Formulate load indexing logic based on row click events
+            if selection and len(selection.get("selection", {}).get("rows", [])) > 0:
+                selected_row_idx = selection["selection"]["rows"][0]
+                target_record = df.iloc[selected_row_idx].to_dict()
+                
+                st.info(f"Active Record: **{target_record['title']}**")
+                
+                # Render logs
+                st.markdown("#### 📜 Action Logs & User Notes Trail")
+                actions_res = supabase.table("mention_actions").select("*").eq("mention_id", target_record['id']).order("inserted_at", desc=True).execute()
+                
+                if not actions_res.data:
+                    st.caption("No custom action notes recorded for this item yet.")
+                else:
+                    for act in actions_res.data:
+                        st.caption(f"⏱️ **{act['inserted_at']}** by **{act['performed_by'] or 'System'}**")
+                        st.info(act['action_note'])
+                
+                # Modification options
+                st.markdown("#### ✏️ Modify Properties")
+                e1, e2, e3, e4 = st.columns(4)
+                with e1:
+                    current_rec_idx = ["monitor only", "engage", "share", "ignore"].index(target_record['recommendation']) if target_record['recommendation'] in ["monitor only", "engage", "share", "ignore"] else 0
+                    edit_rec = st.selectbox("Action Recommendation", ["monitor only", "engage", "share", "ignore"], index=current_rec_idx)
+                with e2:
+                    current_lvl_idx = ["Low", "Medium", "High", "Critical"].index(target_record['alert_level']) if target_record['alert_level'] in ["Low", "Medium", "High", "Critical"] else 0
+                    edit_lvl = st.selectbox("Severity Framework", ["Low", "Medium", "High", "Critical"], index=current_lvl_idx)
+                with e3:
+                    current_stat_idx = ["logged", "escalated", "resolved"].index(target_record['status']) if target_record['status'] in ["logged", "escalated", "resolved"] else 0
+                    edit_stat = st.selectbox("Workflow State", ["logged", "escalated", "resolved"], index=current_stat_idx)
+                with e4:
+                    current_user = target_record['assigned_to_user'] if target_record['assigned_to_user'] in TEAM_USERS else "Unassigned"
+                    edit_user = st.selectbox("Reassign Owner", TEAM_USERS, index=TEAM_USERS.index(current_user))
+                    
+                edit_note = st.text_input("Append New Action Note:", placeholder="Log actions taken or progress adjustments here...")
+                
+                m1, m2 = st.columns([1, 4])
+                with m1:
+                    if st.button("Save Changes", type="primary", use_container_width=True):
+                        if edit_note.strip():
+                            add_action_note(target_record['id'], edit_note, edit_user)
+                        supabase.table("mentions").update({
+                            "recommendation": edit_rec,
+                            "alert_level": edit_lvl,
+                            "status": edit_stat,
+                            "assigned_to_user": edit_user if edit_user != "Unassigned" else None
+                        }).eq("id", target_record['id']).execute()
+                        st.rerun()
+                with m2:
+                    if st.button("🗑️ Delete Record Completely", type="secondary"):
+                        delete_mention_record(target_record['id'])
+                        st.rerun()
+            else:
+                st.caption("💡 Click on any item row inside the tracking matrix above to load notes, append actions, edit options, or remove entries.")
 
-# --- MODULE 3: DAILY CRISIS CENTER ---
+# --- MODULE 4: DAILY CRISIS CENTER ---
 elif app_mode == "🚨 Daily Crisis Center":
     st.subheader("🚨 Template 1: Daily Crisis Alert Generator")
     response = supabase.table("mentions").select("*").in_("alert_level", ["High", "Critical"]).neq("status", "resolved").execute()
@@ -317,7 +346,7 @@ elif app_mode == "🚨 Daily Crisis Center":
 """
         st.text_area("Markdown Summary Text Content", markdown_body, height=300)
 
-# --- MODULE 4: WEEKLY SUMMARIZER ---
+# --- MODULE 5: WEEKLY SUMMARIZER ---
 elif app_mode == "📝 Weekly Summarizer":
     st.subheader("📝 Template 2: Weekly Trend Summary Engine")
     if st.button("Generate Weekly Trend Analysis Document", use_container_width=True):
@@ -338,7 +367,7 @@ elif app_mode == "📝 Weekly Summarizer":
     if "latest_weekly_report" in st.session_state:
         st.markdown(st.session_state["latest_weekly_report"])
 
-# --- MODULE 5: DATABASE Q&A ASSISTANT ---
+# --- MODULE 6: DATABASE Q&A ASSISTANT ---
 elif app_mode == "💬 Database Q&A Assistant":
     st.subheader("💬 Ask Your Media Monitoring Database")
     user_query = st.text_input("Enter your tracking question:", placeholder="Ask about trends, owners, or entries...")
