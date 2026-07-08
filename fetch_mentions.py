@@ -6,6 +6,7 @@ from google import genai
 from google.genai import types
 import dateparser
 import json
+import time  # <-- Imported for the rate limit throttle
 
 # --- 1. SETUP & INITIALIZATION ---
 url = os.environ.get("SUPABASE_URL")
@@ -93,7 +94,6 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
             )
         )
         
-        # Clean response text from potential markdown block wrappers
         clean_text = response.text.strip().lstrip("```json").rstrip("```").strip()
         data = json.loads(clean_text)
         
@@ -101,12 +101,10 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         print(f"🤖 Gemini Evaluation -> Genuine: {is_genuine} | Rationale: {data.get('gatekeeper_rationale')}")
         
         if not is_genuine:
-            # --- PURGE NOISE ---
             supabase.table("mentions").delete().eq("id", mention_id).execute()
             print(f"❌ HARD DELETED noise entry from database: {title[:50]}...")
             return False
             
-        # --- UPDATE VALID RECORD ---
         flags = analyze_quality_and_flags(title + " " + snippet)
         update_payload = {
             "sentiment_category": data.get("category", "Neutral"),
@@ -131,7 +129,6 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         
     except Exception as e:
         print(f"⚠️ Error running processing analytics loop on record {mention_id}: {e}")
-        # If Gemini fails contextual parsing, we update the placeholder to a visible error state for triage visibility
         try:
             supabase.table("mentions").update({
                 "sentiment_rationale": f"AI Processing Error: {str(e)}",
@@ -213,7 +210,15 @@ if __name__ == "__main__":
                         if db_res.data:
                             inserted_id = db_res.data[0]["id"]
                             kw_meta = {"term": kw["term"], "brand": kw["brand_tags"], "theme": kw["theme_layer"]}
+                            
+                            # Execute Gemini evaluation pass
                             process_and_filter_mention_with_gemini(inserted_id, title, snippet, kw_meta)
+                            
+                            # --- RATE LIMIT GUARDRAIL THROTTLE ---
+                            # Sleep for 4 seconds between requests to guarantee staying under the 15 RPM Free Tier ceiling
+                            print("💤 Sleeping 4 seconds to comply with API rate limits...")
+                            time.sleep(4)
+                            
                     except Exception as db_err:
                         print(f"   ❌ Initial database ingestion failure: {db_err}")
             else:
