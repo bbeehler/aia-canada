@@ -13,7 +13,7 @@ key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key)
 ai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-# Read timeframe parameter passed from GitHub workflow inputs (defaults to 'qdr:w' if scheduled)
+# Read timeframe parameter passed from GitHub workflow inputs
 chosen_timeframe = os.environ.get("TIMEFRAME_INPUT") or "qdr:w"
 print(f"⏰ Active Search Horizon Timeframe Window: {chosen_timeframe}")
 
@@ -37,10 +37,6 @@ def analyze_quality_and_flags(text: str):
 
 
 def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet: str, keyword_meta: dict):
-    """
-    Trained Bilingual Media Coordinator Node.
-    Evaluates corporate relevance with an explicit benefit of the doubt clause.
-    """
     brand_knowledge_base = (
         "=== MANDATORY AIA CANADA CORPORATE KNOWLEDGE BASE ===\n"
         "1. PARENT ORGANIZATION:\n"
@@ -56,7 +52,7 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         "   - Right to Repair / Droit à la réparation (Legislation allowing independent shops vehicle data access).\n"
         "   - Automotive skilled trades labor shortages, training programs, EV up-skilling, and collision metrics.\n\n"
         "4. TRIAGE RULES & BENEFIT OF THE DOUBT:\n"
-        "   - REJECT (is_genuine_match = false) ONLY IF the text explicitly proves it is about something else (e.g., American Institute of Architects, aviation, aerospace, or unrelated climate/finance funds).\n"
+        "   - REJECT (is_genuine_match = false) ONLY IF the text explicitly proves it is about something else (e.g., American Institute of Architects, aviation, aerospace, or unrelated climate/finance funds like Carlyle Credit Income Fund).\n"
         "   - ACCEPT (is_genuine_match = true) if the text mentions automotive, cars, aftermarket, mechanics, or Right to Repair.\n"
         "   - STRICT BENEFIT OF THE DOUBT: Search engine snippets are very short. If the text contains the target keyword but is vague or lacks full context, you MUST assume it is genuine and set is_genuine_match to true so a human can review it. Do not over-filter ambiguous snippets.\n"
         "====================================================="
@@ -88,7 +84,6 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
             )
         )
         
-        # Clean response string in case markdown code blocks sneaked past the parameters
         clean_text = response.text.strip().lstrip("```json").rstrip("```").strip()
         data = json.loads(clean_text)
         
@@ -96,12 +91,10 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         print(f"🤖 Gemini Evaluation -> Genuine: {is_genuine} | Rationale: {data.get('gatekeeper_rationale')}")
         
         if not is_genuine:
-            # --- PURGE NOISE ---
             supabase.table("mentions").delete().eq("id", mention_id).execute()
             print(f"❌ HARD DELETED noise entry from database: {title[:50]}...")
             return False
             
-        # --- UPDATE VALID RECORD ---
         flags = analyze_quality_and_flags(title + " " + snippet)
         update_payload = {
             "sentiment_category": data.get("category", "Neutral"),
@@ -115,7 +108,6 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         
         supabase.table("mentions").update(update_payload).eq("id", mention_id).execute()
         
-        # Log the coordinator verification notice to notes trail
         supabase.table("mention_actions").insert({
             "mention_id": mention_id,
             "action_note": f"⚙️ Coordinator Verification: {data.get('gatekeeper_rationale')}",
@@ -127,7 +119,6 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         
     except Exception as e:
         print(f"⚠️ Error running processing analytics loop on record {mention_id}: {e}")
-        print(f"Raw response text was: {response.text if 'response' in locals() else 'None'}")
         return True
 
 
@@ -179,6 +170,7 @@ if __name__ == "__main__":
                     else:
                         date_published = datetime.now().date().isoformat()
                     
+                    # FIXED: Added required placeholder fields to satisfy the database constraints!
                     initial_payload = {
                         "title": title,
                         "url": url_link,
@@ -188,15 +180,22 @@ if __name__ == "__main__":
                         "brands_affected": kw['brand_tags'], 
                         "theme": kw['theme_layer'],
                         "status": "pending",
-                        "recommendation": "monitor only"
+                        "recommendation": "monitor only",
+                        "sentiment_category": "Neutral",
+                        "sentiment_score": 0.0,
+                        "sentiment_rationale": "Pending AI analysis...",
+                        "ai_action_recommendation": "Pending AI analysis...",
+                        "naming_error_flag": False,
+                        "data_conflict_flag": False
                     }
                     
                     try:
                         db_res = supabase.table("mentions").insert(initial_payload).execute()
                         if db_res.data:
                             inserted_id = db_res.data[0]["id"]
-                            # Hand off directly to Gemini for validation and analysis
-                            process_and_filter_mention_with_gemini(inserted_id, title, snippet, kw)
+                            # Hand off to Gemini to overwrite those placeholders OR delete the row
+                            kw_meta = {"term": kw["term"], "brand": kw["brand_tags"], "theme": kw["theme_layer"]}
+                            process_and_filter_mention_with_gemini(inserted_id, title, snippet, kw_meta)
                     except Exception as db_err:
                         print(f"   ❌ Initial database ingestion failure: {db_err}")
             else:
