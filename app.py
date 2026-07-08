@@ -86,6 +86,27 @@ def load_active_team_users():
 
 TEAM_USERS = load_active_team_users()
 
+# --- GLOBAL UTILITY OPERATIONS ---
+def delete_mention_record(record_id):
+    try:
+        supabase.table("mentions").delete().eq("id", record_id).execute()
+        st.toast("Mention successfully removed from index!")
+    except Exception as e:
+        st.error(f"Deletion failed: {e}")
+
+def add_action_note(mention_id, note_text, user):
+    if note_text.strip():
+        try:
+            supabase.table("mention_actions").insert({
+                "mention_id": mention_id,
+                "action_note": note_text,
+                "performed_by": user
+            }).execute()
+            st.toast("Action log note saved successfully!")
+        except Exception as e:
+            st.error(f"Failed to record note: {e}")
+
+
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
 st.sidebar.title("📊 AIA Canada Monitor")
 st.sidebar.caption(f"Operator: {st.session_state['user_full_name']} ({USER_ROLE})")
@@ -167,6 +188,7 @@ if st.sidebar.button("Force Fetch Mentions Now", use_container_width=True, disab
         trigger_github_sync(selected_tbs)
 
 st.sidebar.markdown("---")
+
 app_mode = st.sidebar.radio(
     "Navigation Menu", 
     [
@@ -179,25 +201,94 @@ app_mode = st.sidebar.radio(
     ]
 )
 
-# --- GLOBAL UTILITY OPERATIONS ---
-def delete_mention_record(record_id):
-    try:
-        supabase.table("mentions").delete().eq("id", record_id).execute()
-        st.toast("Mention successfully removed from index!")
-    except Exception as e:
-        st.error(f"Deletion failed: {e}")
+# --- 🚀 URL DEEP LINK INTERCEPTOR ---
+if "mention_id" in st.query_params:
+    dl_id = st.query_params["mention_id"]
+    st.subheader("🔍 Direct Record Viewer")
+    
+    if st.button("⬅️ Close Viewer & Return to Dashboard", type="primary"):
+        st.query_params.clear()
+        st.rerun()
+        
+    st.markdown("---")
+    dl_res = supabase.table("mentions").select("*").eq("id", dl_id).execute()
+    
+    if not dl_res.data:
+        st.error("This record could not be found. It may have been permanently deleted.")
+    else:
+        target_record = dl_res.data[0]
+        
+        st.markdown(f"### 📄 Full Metadata Profile: `{target_record['title']}`")
+        st.info(f"🤖 **Gemini Strategic Action Recommendation:** {target_record.get('ai_action_recommendation', 'N/A')}")
+        
+        meta_col1, meta_col2, meta_col3 = st.columns(3)
+        with meta_col1:
+            st.markdown("**📌 Core Tracking Identifiers**")
+            st.write(f"- **Database ID:** `{target_record['id']}`")
+            st.write(f"- **Published Date:** `{target_record['date_published']}`")
+            st.write(f"- **Direct URL:** [Open Live Web Link]({target_record['url']})")
+        with meta_col2:
+            st.markdown("**🏷️ Context & Scope Tags**")
+            st.write(f"- **Brands Affected:** {', '.join(target_record['brands_affected']) if target_record['brands_affected'] else 'None mapped'}")
+            st.write(f"- **Workflow State:** `{target_record['status']}`")
+            st.write(f"- **Assigned Owner:** `{target_record['assigned_to_user'] or 'Unassigned'}`")
+        with meta_col3:
+            st.markdown("**🧠 Sentiment Metrics**")
+            st.write(f"- **Tone Category:** `{target_record['sentiment_category']}`")
+            st.write(f"- **Intensity Score:** `{target_record['sentiment_score']}`")
+            st.write(f"- **Action Strategy:** `{target_record['recommendation']}`")
+        
+        st.markdown("**📝 Text Snippet & Analytical Explanations**")
+        st.write(f"**Raw Snippet:** *\"{target_record['snippet']}\"*")
+        st.write(f"**Gemini Rationale:** *{target_record['sentiment_rationale']}*")
+        
+        st.markdown("---")
+        st.markdown("#### 📜 Actions Taken & Notes History Trail")
+        actions_res = supabase.table("mention_actions").select("*").eq("mention_id", target_record['id']).order("inserted_at", desc=True).execute()
+        
+        if not actions_res.data:
+            st.caption("No custom action notes logged for this profile yet.")
+        else:
+            history_df = pd.DataFrame(actions_res.data)
+            history_df = history_df.rename(columns={"inserted_at": "Timestamp", "performed_by": "User", "action_note": "Action Details"})
+            st.table(history_df[["Timestamp", "User", "Action Details"]])
+        
+        st.markdown("#### ✏️ Update Classification & Append New Action Log")
+        e1, e2, e3, e4 = st.columns(4)
+        with e1:
+            current_rec_idx = ["monitor only", "engage", "share", "ignore"].index(target_record['recommendation']) if target_record['recommendation'] in ["monitor only", "engage", "share", "ignore"] else 0
+            edit_rec = st.selectbox("Action Recommendation", ["monitor only", "engage", "share", "ignore"], index=current_rec_idx, key="dl_edit_rec", disabled=IS_VIEWER)
+        with e2:
+            current_lvl_idx = ["Low", "Medium", "High", "Critical"].index(target_record['alert_level']) if target_record['alert_level'] in ["Low", "Medium", "High", "Critical"] else 0
+            edit_lvl = st.selectbox("Severity Framework", ["Low", "Medium", "High", "Critical"], index=current_lvl_idx, key="dl_edit_lvl", disabled=IS_VIEWER)
+        with e3:
+            current_stat_idx = ["pending", "logged", "escalated", "resolved"].index(target_record['status']) if target_record['status'] in ["pending", "logged", "escalated", "resolved"] else 0
+            edit_stat = st.selectbox("Workflow State", ["pending", "logged", "escalated", "resolved"], index=current_stat_idx, key="dl_edit_stat", disabled=IS_VIEWER)
+        with e4:
+            current_user = target_record['assigned_to_user'] if target_record['assigned_to_user'] in TEAM_USERS else "Unassigned"
+            edit_user = st.selectbox("Reassign Owner", TEAM_USERS, index=TEAM_USERS.index(current_user), key="dl_edit_user", disabled=IS_VIEWER)
+            
+        edit_note = st.text_input("Type new action note to append to history trail:", key="dl_edit_note_input", disabled=IS_VIEWER)
+        
+        m1, m2 = st.columns([1, 4])
+        with m1:
+            if st.button("Save Changes", type="primary", use_container_width=True, key="dl_save_changes_btn", disabled=IS_VIEWER):
+                if edit_note.strip():
+                    add_action_note(target_record['id'], edit_note, edit_user)
+                supabase.table("mentions").update({
+                    "recommendation": edit_rec,
+                    "alert_level": edit_lvl,
+                    "status": edit_stat,
+                    "assigned_to_user": edit_user if edit_user != "Unassigned" else None
+                }).eq("id", target_record['id']).execute()
+                st.rerun()
+        with m2:
+            if st.button("🗑 Permanent Deletion", type="secondary", key="dl_perm_delete_btn", disabled=IS_VIEWER):
+                delete_mention_record(target_record['id'])
+                st.query_params.clear()
+                st.rerun()
+    st.stop() # This entirely pauses the rest of the app from rendering while viewing a deep link!
 
-def add_action_note(mention_id, note_text, user):
-    if note_text.strip():
-        try:
-            supabase.table("mention_actions").insert({
-                "mention_id": mention_id,
-                "action_note": note_text,
-                "performed_by": user
-            }).execute()
-            st.toast("Action log note saved successfully!")
-        except Exception as e:
-            st.error(f"Failed to record note: {e}")
 
 # --- 3. MODULE 1: INBOX / TRIAGE ---
 if app_mode == "📥 Inbox / Triage":
@@ -239,9 +330,6 @@ if app_mode == "📥 Inbox / Triage":
             
         st.markdown("### 📄 Detailed Classification Workspaces")
         for m in mentions:
-            # INJECTED HTML ANCHOR TARGET FOR REPORT LINKS
-            st.markdown(f'<div id="{m["id"]}"></div>', unsafe_allow_html=True)
-            
             with st.expander(f"🔍 {m['outlet_platform']} | {m['title']} (Published: {m['date_published']})"):
                 st.info(f"🤖 **Gemini Strategic Action Recommendation:** {m.get('ai_action_recommendation', 'N/A')}")
                 
@@ -349,9 +437,6 @@ elif app_mode == "📋 Reviewed Database Table":
             if selection and len(selection.get("selection", {}).get("rows", [])) > 0:
                 selected_row_idx = selection["selection"]["rows"][0]
                 target_record = df.iloc[selected_row_idx].to_dict()
-                
-                # INJECTED HTML ANCHOR TARGET FOR REPORT LINKS
-                st.markdown(f'<div id="{target_record["id"]}"></div>', unsafe_allow_html=True)
                 
                 st.markdown(f"### 📄 Full Metadata Profile: `{target_record['title']}`")
                 st.info(f"🤖 **Gemini Strategic Action Recommendation for this Mention:** {target_record.get('ai_action_recommendation', 'N/A')}")
