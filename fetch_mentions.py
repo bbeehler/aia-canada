@@ -40,8 +40,7 @@ def analyze_quality_and_flags(text: str):
 def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet: str, keyword_meta: dict):
     """
     Trained Bilingual Media Coordinator Node.
-    Evaluates corporate relevance. If irrelevant, hard deletes the row from Supabase.
-    If valid, updates the row with rich analysis, sentiment metrics, and recommendations.
+    Evaluates corporate relevance with a 'Benefit of the Doubt' leniency for short snippets.
     """
     
     brand_knowledge_base = (
@@ -58,9 +57,10 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         "3. CORE STRATEGIC PILLARS & CAMPAIGNS:\n"
         "   - Right to Repair / Droit à la réparation (Legislation allowing independent shops vehicle data access).\n"
         "   - Automotive skilled trades labor shortages, training programs, EV up-skilling, and collision metrics.\n\n"
-        "4. ANTI-NOISE RULES (CRITERIA FOR REJECTION):\n"
-        "   - REJECT/DELETE any mentions of the American Institute of Architects (AIA), Aerospace Industries Association, or AIA insurance.\n"
-        "   - REJECT/DELETE any mentions of global climate forums or finance metrics named CCIF unless explicitly tied to Canadian collision repair shops.\n"
+        "4. TRIAGE RULES & BENEFIT OF THE DOUBT:\n"
+        "   - REJECT (is_genuine_match = false) ONLY IF the text explicitly proves it is about something else (e.g., American Institute of Architects, aviation, aerospace, or unrelated climate/finance funds).\n"
+        "   - ACCEPT (is_genuine_match = true) if the text mentions automotive, cars, aftermarket, mechanics, or Right to Repair.\n"
+        "   - STRICT BENEFIT OF THE DOUBT: Search engine snippets are very short. If the text contains the target keyword but is vague or lacks full context, you MUST assume it is genuine and set is_genuine_match to true so a human can review it. Do not over-filter ambiguous snippets.\n"
         "====================================================="
     )
 
@@ -68,10 +68,10 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         f"{brand_knowledge_base}\n\n"
         "YOU ARE THE ELITE MEDIA AUDITOR AND COMMUNICATIONS COORDINATOR FOR AIA CANADA.\n"
         "Analyze the provided text context (supports English and French) and determine if this record "
-        "is a genuine match for our organization, sub-brands, or pillars. Return a clean JSON payload matching this schema:\n\n"
+        "is a genuine match for our organization. Return a clean JSON payload matching this schema:\n\n"
         "{\n"
         "  \"is_genuine_match\": true | false,\n"
-        "  \"gatekeeper_rationale\": \"A short explanation of why this was approved as genuine or rejected as noise.\",\n"
+        "  \"gatekeeper_rationale\": \"A short explanation of why this was approved as genuine or rejected as explicit noise.\",\n"
         "  \"category\": \"Positive\" | \"Neutral\" | \"Negative\" | \"Mixed\",\n"
         "  \"score\": float between -1.0 and 1.0,\n"
         "  \"rationale\": \"Explanation of sentiment analysis score choice.\",\n"
