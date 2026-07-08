@@ -486,15 +486,30 @@ elif app_mode == "💬 Database Q&A Assistant":
     
     if user_query:
         with st.spinner("Scanning logs..."):
-            all_mentions = supabase.table("mentions").select("title, outlet_platform, theme, sentiment_category, assigned_to_user, alert_level").limit(150).execute()
-            qa_instruction = "You are an intelligent data specialist tracking brand awareness for AIA Canada. Answer using only context."
-            response = ai_client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[f"Context:\n{str(all_mentions.data)}\n\nQuery: {user_query}"],
-                config=types.GenerateContentConfig(system_instruction=qa_instruction)
-            )
-            st.info(response.text)
-
+            try:
+                # 1. Fetch the data
+                all_mentions = supabase.table("mentions").select("title, outlet_platform, theme, sentiment_category, assigned_to_user, alert_level").limit(150).execute()
+                
+                import json
+                # 2. Convert raw Python dictionaries into safely escaped, clean JSON for the AI to read
+                clean_context = json.dumps(all_mentions.data, indent=2)
+                
+                qa_instruction = "You are an intelligent data specialist tracking brand awareness for AIA Canada. Answer using only the provided context."
+                
+                # 3. Pass the clean string to Gemini
+                response = ai_client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=f"Context:\n{clean_context}\n\nQuery: {user_query}",
+                    config=types.GenerateContentConfig(system_instruction=qa_instruction)
+                )
+                
+                st.info(response.text)
+                
+            except Exception as e:
+                # 4. If Gemini rejects the payload, this explicitly catches the error and forces Streamlit 
+                # to print the real error text to the screen instead of redacting it!
+                st.error(f"⚠️ API Error Details: {str(e)}")
+                
 # --- MODULE 6: SYSTEM SETTINGS DASHBOARD ---
 elif app_mode == "⚙️ System Settings Dashboard":
     st.subheader("⚙️ System Settings & Parameter Tuning Dashboard")
