@@ -453,31 +453,87 @@ elif app_mode == "🚨 Daily Crisis Center":
 """
         st.text_area("Markdown Summary Text Content", markdown_body, height=300)
 
-# --- MODULE 4: WEEKLY SUMMARIZER ---
-elif app_mode == "📝 Weekly Summarizer":
-    st.subheader("📝 Weekly Trend Summary Engine")
-    try:
-        tmpl_res = supabase.table("monitor_templates").select("*").eq("template_name", "Weekly Trend Summary").execute()
-        system_instruction = tmpl_res.data[0]["system_instruction_prompt"]
-    except Exception:
-        system_instruction = "You are the senior media monitoring AI analyst for AIA Canada. Format using CP rules."
+# --- MODULE 4: AI REPORT BUILDER ---
+elif app_mode == "📝 AI Report Builder":
+    st.subheader("📝 Automated Executive Reporting")
+    st.write("Generate AI-driven summaries based on the raw tracking data in your database.")
+    
+    tab_daily, tab_weekly = st.tabs(["📅 Daily Triage Rollup", "🗓️ Weekly Trend Summary"])
+    
+    # --- DAILY REPORT TAB ---
+    with tab_daily:
+        st.markdown("### Generate Daily Operations Report")
+        st.write("Compiles a summary of all items that were successfully processed and cleared from the inbox for a specific date.")
+        
+        target_date = st.date_input("Select Processing Date", datetime.now().date(), key="daily_date_picker")
+        
+        # Pull the custom daily prompt from Supabase
+        try:
+            tmpl_res = supabase.table("monitor_templates").select("*").eq("template_name", "Daily Triage Rollup").execute()
+            daily_instruction = tmpl_res.data[0]["system_instruction_prompt"]
+        except Exception:
+            daily_instruction = "You are a PR assistant for AIA Canada. Summarize the day's media mentions briefly."
 
-    if st.button("Generate Weekly Trend Analysis Document", use_container_width=True):
-        with st.spinner("Compiling database records for processing with Gemini..."):
-            raw_data = supabase.table("mentions").select("*").neq("status", "pending").limit(100).execute()
-            if not raw_data.data:
-                st.warning("No validated tracking records discovered.")
-            else:
-                response = ai_client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=[f"Logs: {str(raw_data.data)}"],
-                    config=types.GenerateContentConfig(system_instruction=system_instruction)
-                )
-                st.session_state["latest_weekly_report"] = response.text
-                st.success("Generation Complete!")
+        if st.button("Generate Daily Rollup", use_container_width=True, type="primary"):
+            with st.spinner("Extracting today's processed logs..."):
+                # Define the start and end of the selected day to filter the database
+                start_iso = datetime.combine(target_date, datetime.min.time()).isoformat()
+                end_iso = datetime.combine(target_date, datetime.max.time()).isoformat()
                 
-    if "latest_weekly_report" in st.session_state:
-        st.markdown(st.session_state["latest_weekly_report"])
+                # Fetch records that entered the system on this date and have been processed (no longer pending)
+                raw_data = supabase.table("mentions").select("title, outlet_platform, theme, status, recommendation, brands_affected, alert_level").neq("status", "pending").gte("inserted_at", start_iso).lte("inserted_at", end_iso).execute()
+                
+                if not raw_data.data:
+                    st.warning("No media tracking records were processed or logged on this specific date.")
+                else:
+                    try:
+                        response = ai_client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=[f"Daily Processed Logs:\n{str(raw_data.data)}"],
+                            config=types.GenerateContentConfig(system_instruction=daily_instruction)
+                        )
+                        st.session_state["latest_daily_report"] = response.text
+                        st.success("Daily Report Generation Complete!")
+                    except Exception as e:
+                        st.error(f"Generation failed: {e}")
+                        
+        if "latest_daily_report" in st.session_state:
+            st.markdown("---")
+            st.markdown(st.session_state["latest_daily_report"])
+
+    # --- WEEKLY REPORT TAB ---
+    with tab_weekly:
+        st.markdown("### Generate Weekly Trend Analysis")
+        st.write("Compiles a broad, macro-level summary of industry trends from the last 100 processed tracking items.")
+        
+        try:
+            tmpl_res = supabase.table("monitor_templates").select("*").eq("template_name", "Weekly Trend Summary").execute()
+            weekly_instruction = tmpl_res.data[0]["system_instruction_prompt"]
+        except Exception:
+            weekly_instruction = "You are the senior media monitoring AI analyst for AIA Canada. Format using CP rules."
+
+        if st.button("Generate Weekly Trend Document", use_container_width=True):
+            with st.spinner("Compiling historical database records for processing with Gemini..."):
+                # Fetches the latest 100 processed items regardless of date
+                raw_data = supabase.table("mentions").select("title, outlet_platform, theme, status, recommendation, brands_affected, alert_level").neq("status", "pending").order("inserted_at", desc=True).limit(100).execute()
+                
+                if not raw_data.data:
+                    st.warning("No validated tracking records discovered.")
+                else:
+                    try:
+                        response = ai_client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=[f"Historical Logs:\n{str(raw_data.data)}"],
+                            config=types.GenerateContentConfig(system_instruction=weekly_instruction)
+                        )
+                        st.session_state["latest_weekly_report"] = response.text
+                        st.success("Weekly Report Generation Complete!")
+                    except Exception as e:
+                        st.error(f"Generation failed: {e}")
+                    
+        if "latest_weekly_report" in st.session_state:
+            st.markdown("---")
+            st.markdown(st.session_state["latest_weekly_report"])
 
 # --- MODULE 5: DATABASE Q&A ASSISTANT ---
 elif app_mode == "💬 Database Q&A Assistant":
