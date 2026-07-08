@@ -18,7 +18,7 @@ chosen_timeframe = os.environ.get("TIMEFRAME_INPUT") or "qdr:w"
 
 
 def analyze_quality_and_flags(text: str):
-    """Deep structural inspection for known compliance violations."""
+    """Deep structural inspection for known corporate compliance violations."""
     flags = {"naming_error": False, "data_conflict": False, "conflict_details": ""}
     
     # Flag known improper phrasing variants
