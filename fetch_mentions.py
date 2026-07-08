@@ -15,12 +15,11 @@ ai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 # Read timeframe parameter passed from GitHub workflow inputs (defaults to 'qdr:w' if scheduled)
 chosen_timeframe = os.environ.get("TIMEFRAME_INPUT") or "qdr:w"
+print(f"⏰ Active Search Horizon Timeframe Window: {chosen_timeframe}")
 
 
 def analyze_quality_and_flags(text: str):
-    """Deep structural inspection for corporate compliance violations."""
     flags = {"naming_error": False, "data_conflict": False, "conflict_details": ""}
-    
     incorrect_variants = ["JPMS", "AIA alone", "AIAC"]
     for variant in incorrect_variants:
         if variant.lower() in text.lower():
@@ -40,9 +39,8 @@ def analyze_quality_and_flags(text: str):
 def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet: str, keyword_meta: dict):
     """
     Trained Bilingual Media Coordinator Node.
-    Evaluates corporate relevance with a 'Benefit of the Doubt' leniency for short snippets.
+    Evaluates corporate relevance with an explicit benefit of the doubt clause.
     """
-    
     brand_knowledge_base = (
         "=== MANDATORY AIA CANADA CORPORATE KNOWLEDGE BASE ===\n"
         "1. PARENT ORGANIZATION:\n"
@@ -75,7 +73,7 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         "  \"category\": \"Positive\" | \"Neutral\" | \"Negative\" | \"Mixed\",\n"
         "  \"score\": float between -1.0 and 1.0,\n"
         "  \"rationale\": \"Explanation of sentiment analysis score choice.\",\n"
-        "  \"ai_action_recommendation\": \"A strategic, 1-2 sentence tactical recommendation explaining exactly what action the team should execute next based on this piece of media.\"\n"
+        "  \"ai_action_recommendation\": \"A strategic tactical recommendation text sentence.\"\n"
         "}\n"
         "Output raw JSON fields only. Do not format inside markdown blocks or fences."
     )
@@ -89,18 +87,22 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
                 response_mime_type="application/json"
             )
         )
-        data = json.loads(response.text)
+        
+        # Clean response string in case markdown code blocks sneaked past the parameters
+        clean_text = response.text.strip().lstrip("```json").rstrip("```").strip()
+        data = json.loads(clean_text)
+        
         is_genuine = data.get("is_genuine_match", True)
+        print(f"🤖 Gemini Evaluation -> Genuine: {is_genuine} | Rationale: {data.get('gatekeeper_rationale')}")
         
         if not is_genuine:
-            # --- ACTION A: HARD PURGE NOISE FROM THE DATABASE ---
+            # --- PURGE NOISE ---
             supabase.table("mentions").delete().eq("id", mention_id).execute()
-            print(f" Wiped Noise Record: [ID: {mention_id}] {title[:40]}... (Reason: {data.get('gatekeeper_rationale')})")
+            print(f"❌ HARD DELETED noise entry from database: {title[:50]}...")
             return False
             
-        # --- ACTION B: UPDATE REAL RECORDS WITH GEMINI METRICS ---
+        # --- UPDATE VALID RECORD ---
         flags = analyze_quality_and_flags(title + " " + snippet)
-        
         update_payload = {
             "sentiment_category": data.get("category", "Neutral"),
             "sentiment_score": data.get("score", 0.0),
@@ -113,39 +115,42 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         
         supabase.table("mentions").update(update_payload).eq("id", mention_id).execute()
         
-        # Log the gatekeeper's confirmation note into history logs table
+        # Log the coordinator verification notice to notes trail
         supabase.table("mention_actions").insert({
             "mention_id": mention_id,
             "action_note": f"⚙️ Coordinator Verification: {data.get('gatekeeper_rationale')}",
             "performed_by": "Gemini System Intelligence"
         }).execute()
         
-        print(f" Verified & Analyzed Record: {title[:40]}... | Saved to Triage.")
+        print(f"✅ SAVED AND ANALYZED target entry successfully: {title[:50]}...")
         return True
         
     except Exception as e:
-        print(f"Smart Processing Node error on record {mention_id}: {e}")
+        print(f"⚠️ Error running processing analytics loop on record {mention_id}: {e}")
+        print(f"Raw response text was: {response.text if 'response' in locals() else 'None'}")
         return True
 
 
 if __name__ == "__main__":
-    print("Automation engine initialized. Fetching live parameters from Supabase...")
+    print("🚀 Ingestion and Triage Engine Initializing...")
 
     try:
         kw_response = supabase.table("monitor_keywords").select("*").execute()
         target_keywords = kw_response.data
+        print(f"📋 Found {len(target_keywords)} tracking keywords active in your database roster.")
     except Exception as e:
-        print(f"Failed to query database keywords: {e}")
+        print(f"❌ Failed to query database keywords: {e}")
         target_keywords = []
 
     if not target_keywords:
-        print("No active tracking keywords discovered in configuration tables. Terminating sweep.")
+        print("🛑 No active tracking keywords discovered. Terminating sweep loop.")
         exit(0)
 
     for kw in target_keywords:
         query_string = f"{kw['term']} -site:aiacanada.com -site:ccif.ca -site:i-car.ca -site:righttorepair.ca"
-        url = "https://google.serper.dev/search"
+        print(f"\n🔍 Pinging Google Serper for: {query_string}")
         
+        url = "https://google.serper.dev/search"
         payload = {
             "q": query_string, 
             "num": 5,
@@ -156,11 +161,16 @@ if __name__ == "__main__":
         try:
             res = requests.post(url, headers=headers, json=payload)
             if res.status_code == 200:
-                for mention in res.json().get("organic", []):
+                results = res.json().get("organic", [])
+                print(f"📡 Serper returned {len(results)} search hit candidates.")
+                
+                for mention in results:
                     title = mention.get("title", "")
                     url_link = mention.get("link", "")
                     snippet = mention.get("snippet", "")
                     source_platform = mention.get("source", "Web Resource")
+                    
+                    print(f"   👉 Processing Raw Candidate: \"{title[:50]}\"")
                     
                     raw_date_string = mention.get("date") 
                     if raw_date_string:
@@ -169,7 +179,6 @@ if __name__ == "__main__":
                     else:
                         date_published = datetime.now().date().isoformat()
                     
-                    # 1. Ingestion Stage: Save baseline search record to generate a unique record ID
                     initial_payload = {
                         "title": title,
                         "url": url_link,
@@ -186,12 +195,12 @@ if __name__ == "__main__":
                         db_res = supabase.table("mentions").insert(initial_payload).execute()
                         if db_res.data:
                             inserted_id = db_res.data[0]["id"]
-                            
-                            # 2. Automated Purge & Analysis Stage: Hand off record immediately to Gemini
-                            kw_meta = {"term": kw["term"], "brand": kw["brand_tags"], "theme": kw["theme_layer"]}
-                            process_and_filter_mention_with_gemini(inserted_id, title, snippet, kw_meta)
+                            # Hand off directly to Gemini for validation and analysis
+                            process_and_filter_mention_with_gemini(inserted_id, title, snippet, kw)
                     except Exception as db_err:
-                        print(f"Initial row lock error: {db_err}")
+                        print(f"   ❌ Initial database ingestion failure: {db_err}")
+            else:
+                print(f"❌ Serper API returned error code {res.status_code}: {res.text}")
                         
         except Exception as e:
-            print(f"Crawl failure for phrase '{kw['term']}': {e}")
+            print(f"❌ Network/Crawl connection failure for phrase '{kw['term']}': {e}")
