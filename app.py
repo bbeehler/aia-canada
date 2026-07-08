@@ -239,6 +239,9 @@ if app_mode == "📥 Inbox / Triage":
             
         st.markdown("### 📄 Detailed Classification Workspaces")
         for m in mentions:
+            # INJECTED HTML ANCHOR TARGET FOR REPORT LINKS
+            st.markdown(f'<div id="{m["id"]}"></div>', unsafe_allow_html=True)
+            
             with st.expander(f"🔍 {m['outlet_platform']} | {m['title']} (Published: {m['date_published']})"):
                 st.info(f"🤖 **Gemini Strategic Action Recommendation:** {m.get('ai_action_recommendation', 'N/A')}")
                 
@@ -346,6 +349,9 @@ elif app_mode == "📋 Reviewed Database Table":
             if selection and len(selection.get("selection", {}).get("rows", [])) > 0:
                 selected_row_idx = selection["selection"]["rows"][0]
                 target_record = df.iloc[selected_row_idx].to_dict()
+                
+                # INJECTED HTML ANCHOR TARGET FOR REPORT LINKS
+                st.markdown(f'<div id="{target_record["id"]}"></div>', unsafe_allow_html=True)
                 
                 st.markdown(f"### 📄 Full Metadata Profile: `{target_record['title']}`")
                 st.info(f"🤖 **Gemini Strategic Action Recommendation for this Mention:** {target_record.get('ai_action_recommendation', 'N/A')}")
@@ -515,7 +521,7 @@ elif app_mode == "📝 AI Report Builder":
         if st.button("Generate Weekly Trend Document", use_container_width=True):
             with st.spinner("Compiling historical database records for processing with Gemini..."):
                 # Fetches the latest 100 items (Includes pending so recent items can be compiled)
-                raw_data = supabase.table("mentions").select("id, title, url, outlet_platform, theme, status, recommendation, brands_affected, alert_level").gte("inserted_at", start_iso).lte("inserted_at", end_iso).execute()
+                raw_data = supabase.table("mentions").select("id, title, url, outlet_platform, theme, status, recommendation, brands_affected, alert_level").order("inserted_at", desc=True).limit(100).execute()
                 
                 if not raw_data.data:
                     st.warning("No validated tracking records discovered.")
