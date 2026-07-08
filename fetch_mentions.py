@@ -1,3 +1,10 @@
+Here is your completely updated `fetch_mentions.py` code.
+
+I have seamlessly integrated the **Smart Triage Gatekeeper** logic directly into the script. The script now leverages Gemini to execute a strict, context-aware first-level audit using your specific tracking keyword data.
+
+If Gemini flags a search result as irrelevant noise, it automatically marks the row status as `ignored` and updates the recommendation to `ignore`, keeping your primary triage queue clean while preserving the entry with a detailed audit log note.
+
+```python
 import os
 from datetime import datetime
 import requests
@@ -5,8 +12,9 @@ from supabase import create_client
 from google import genai
 from google.genai import types
 import dateparser
-from datetime import datetime
+import json
 
+# --- 1. SETUP & INITIALIZATION ---
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key)
@@ -14,6 +22,7 @@ ai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 # Read timeframe parameter passed from GitHub workflow inputs (defaults to 'qdr:w' if scheduled)
 chosen_timeframe = os.environ.get("TIMEFRAME_INPUT") or "qdr:w"
+
 
 def analyze_quality_and_flags(text: str):
     flags = {"naming_error": False, "data_conflict": False, "conflict_details": ""}
@@ -29,19 +38,37 @@ def analyze_quality_and_flags(text: str):
         flags["conflict_details"] = "Outdated domain suffix used for membership email."
     return flags
 
-def compute_live_sentiment_with_gemini(title: str, snippet: str):
-    """Leverages Gemini to extract sentiment metrics and clear strategic action recommendations[cite: 2]."""
+
+def compute_live_sentiment_and_gatekeep_with_gemini(title: str, snippet: str, keyword_meta: dict):
+    """
+    Executes a high-precision first-level validation audit to eliminate noise.
+    Determines if the mention genuinely concerns AIA Canada or its sub-brands.
+    """
     system_prompt = (
-        "You are an expert PR and media monitoring AI tracking brand reputation for AIA Canada[cite: 2]. "
-        "Analyze the provided headline and snippet text context and return a clean JSON payload matching this exact schema:\n"
+        "You are a senior media intelligence gatekeeper tracking brand reputation for AIA Canada.\n"
+        "Your first job is to run a strict Context Validation Audit to determine if this mention genuinely "
+        "concerns the Automotive Industries Association of Canada, its sub-brands (CCIF, I-CAR Canada, YPA/Young Professionals Auto Care), "
+        "or relevant Canadian automotive aftermarket sector pillars (e.g., Right to Repair legislation, skilled trades training).\n\n"
+        
+        f"Target context clues to evaluate against:\n"
+        f"- Target Phrase Used: '{keyword_meta.get('term')}'\n"
+        f"- Expected Sub-Brands: {keyword_meta.get('brand')}\n"
+        f"- Expected Theme Area: '{keyword_meta.get('theme')}'\n\n"
+        
+        "Analyze the headline and snippet text context carefully. Output a raw JSON payload matching this schema exactly:\n"
         "{\n"
+        "  \"is_genuine_match\": true | false,\n"
+        "  \"gatekeeper_rationale\": \"A concise single sentence explaining why this is a real brand match or why it is irrelevant noise.\",\n"
         "  \"category\": \"Positive\" | \"Neutral\" | \"Negative\" | \"Mixed\",\n"
         "  \"score\": float between -1.0 and 1.0,\n"
         "  \"rationale\": \"A single clear sentence explaining your dynamic analysis decision.\",\n"
-        "  \"ai_action_recommendation\": \"A strategic, 1-2 sentence tactical recommendation explaining exactly what action the team should execute next based on this piece of media (e.g., draft a holding statement, log and add to the weekly report, ignore as industry noise, reach out for light-touch correction). Keep it highly actionable.\"\n"
+        "  \"ai_action_recommendation\": \"A strategic, 1-2 sentence tactical recommendation explaining exactly what action the team should execute next based on this piece of media.\"\n"
         "}\n"
-        "Output raw JSON data files only. Do not format inside markdown blocks."
+        "Output raw JSON data files only. Do not wrap inside markdown blocks or code fences."
     )
+    
+    # Baseline fallback parameters if the API execution encounters an error
+    fallback = (True, "Standard baseline processing bypass applied.", "Neutral", 0.0, "Baseline log verification.", "Monitor tracking loop index.")
     
     try:
         response = ai_client.models.generate_content(
@@ -52,17 +79,19 @@ def compute_live_sentiment_with_gemini(title: str, snippet: str):
                 response_mime_type="application/json"
             )
         )
-        import json
         data = json.loads(response.text)
         return (
-            data.get("category", "Neutral"), 
-            data.get("score", 0.0), 
-            data.get("rationale", "Standard automated processing baseline."),
-            data.get("ai_action_recommendation", "Monitor tracking index; no emergency action required.")
+            data.get("is_genuine_match", True),
+            data.get("gatekeeper_rationale", "Context confirmed via automated routing verification rules."),
+            data.get("category", "Neutral"),
+            data.get("score", 0.0),
+            data.get("rationale", "Analysis processing complete."),
+            data.get("ai_action_recommendation", "Monitor tracking loop index; no emergency action required.")
         )
     except Exception as e:
-        print(f"Gemini evaluation failure: {e}")
-        return "Neutral", 0.0, "Analysis fallback loops applied.", "Monitor only."
+        print(f"Smart Triage Gatekeeper execution failure: {e}")
+        return fallback
+
 
 def process_and_save_mention(live_item, keyword_meta):
     title = live_item.get("title", "")
@@ -83,14 +112,22 @@ def process_and_save_mention(live_item, keyword_meta):
     else:
         date_published = datetime.now().date().isoformat()
         
+    # Run the Smart Triage Gatekeeper evaluation
+    is_genuine, gate_reason, category, score, rationale, ai_rec = compute_live_sentiment_and_gatekeep_with_gemini(
+        title, snippet, keyword_meta
+    )
+    
+    # Route status and recommendation dynamically based on gatekeeper determination
+    initial_status = "pending" if is_genuine else "ignored"
+    initial_recommendation = "monitor only" if is_genuine else "ignore"
+    
     flags = analyze_quality_and_flags(title + " " + snippet)
-    category, score, rationale, ai_rec = compute_live_sentiment_with_gemini(title, snippet)
     
     payload = {
         "title": title,
         "url": url_link,
         "outlet_platform": source_platform,
-        "date_published": date_published,  # <-- Storing the literal parsed publication date
+        "date_published": date_published,
         "snippet": snippet,
         "brands_affected": keyword_meta['brand'], 
         "theme": keyword_meta['theme'],
@@ -101,14 +138,26 @@ def process_and_save_mention(live_item, keyword_meta):
         "naming_error_flag": flags["naming_error"],
         "data_conflict_flag": flags["data_conflict"],
         "data_conflict_details": flags["conflict_details"],
-        "status": "pending"
+        "status": initial_status,
+        "recommendation": initial_recommendation
     }
     
     try:
-        supabase.table("mentions").insert(payload).execute()
-        print(f"Successfully logged mention: {title} (Published: {date_published})")
+        res = supabase.table("mentions").insert(payload).execute()
+        inserted_row_id = res.data[0]["id"] if res.data else None
+        
+        # Log Gemini's filter justification note into the action log audit table permanently
+        if inserted_row_id:
+            supabase.table("mention_actions").insert({
+                "mention_id": inserted_row_id,
+                "action_note": f"🤖 Smart Triage Audit Notice: {gate_reason}",
+                "performed_by": "Gemini Gatekeeper"
+            }).execute()
+            
+        print(f"Successfully logged mention: {title} | Routing Status: {initial_status.upper()}")
     except Exception as e:
         print(f"Database insertion error: {e}")
+
 
 if __name__ == "__main__":
     print("Automation engine initialized. Fetching live parameters from Supabase...")
@@ -132,7 +181,7 @@ if __name__ == "__main__":
         payload = {
             "q": query_string, 
             "num": 5,
-            "tbs": chosen_timeframe  # <-- Make sure this line is active
+            "tbs": chosen_timeframe  
         }
         headers = {'X-API-KEY': os.environ.get("SERPER_API_KEY"), 'Content-Type': 'application/json'}
         
@@ -141,7 +190,13 @@ if __name__ == "__main__":
             if res.status_code == 200:
                 for mention in res.json().get("organic", []):
                     # Package metadata variables using database list keys
-                    kw_meta = {"brand": kw["brand_tags"], "theme": kw["theme_layer"]}
+                    kw_meta = {
+                        "term": kw["term"],
+                        "brand": kw["brand_tags"], 
+                        "theme": kw["theme_layer"]
+                    }
                     process_and_save_mention(mention, kw_meta)
         except Exception as e:
             print(f"Crawl failure for phrase '{kw['term']}': {e}")
+
+```
