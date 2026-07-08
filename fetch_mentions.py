@@ -1,10 +1,3 @@
-Here is your completely updated `fetch_mentions.py` code.
-
-I have seamlessly integrated the **Smart Triage Gatekeeper** logic directly into the script. The script now leverages Gemini to execute a strict, context-aware first-level audit using your specific tracking keyword data.
-
-If Gemini flags a search result as irrelevant noise, it automatically marks the row status as `ignored` and updates the recommendation to `ignore`, keeping your primary triage queue clean while preserving the entry with a detailed audit log note.
-
-```python
 import os
 from datetime import datetime
 import requests
