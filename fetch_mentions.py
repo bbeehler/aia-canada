@@ -37,6 +37,10 @@ def analyze_quality_and_flags(text: str):
 
 
 def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet: str, keyword_meta: dict):
+    """
+    Trained Bilingual Media Coordinator Node.
+    Evaluates corporate relevance against strict metadata context layers.
+    """
     brand_knowledge_base = (
         "=== MANDATORY AIA CANADA CORPORATE KNOWLEDGE BASE ===\n"
         "1. PARENT ORGANIZATION:\n"
@@ -51,21 +55,26 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         "3. CORE STRATEGIC PILLARS & CAMPAIGNS:\n"
         "   - Right to Repair / Droit à la réparation (Legislation allowing independent shops vehicle data access).\n"
         "   - Automotive skilled trades labor shortages, training programs, EV up-skilling, and collision metrics.\n\n"
-        "4. TRIAGE RULES & BENEFIT OF THE DOUBT:\n"
-        "   - REJECT (is_genuine_match = false) ONLY IF the text explicitly proves it is about something else (e.g., American Institute of Architects, aviation, aerospace, or unrelated climate/finance funds like Carlyle Credit Income Fund).\n"
-        "   - ACCEPT (is_genuine_match = true) if the text mentions automotive, cars, aftermarket, mechanics, or Right to Repair.\n"
-        "   - STRICT BENEFIT OF THE DOUBT: Search engine snippets are very short. If the text contains the target keyword but is vague or lacks full context, you MUST assume it is genuine and set is_genuine_match to true so a human can review it. Do not over-filter ambiguous snippets.\n"
+        "4. ANTI-NOISE RULES:\n"
+        "   - REJECT (is_genuine_match = false) ANY mentions contextually referring to the American Institute of Architects (AIA), Aerospace Industries Association, AIA insurance, or financial funds like Carlyle Credit Income Fund (CCIF).\n"
         "====================================================="
     )
 
     system_prompt = (
         f"{brand_knowledge_base}\n\n"
         "YOU ARE THE ELITE MEDIA AUDITOR AND COMMUNICATIONS COORDINATOR FOR AIA CANADA.\n"
-        "Analyze the provided text context (supports English and French) and determine if this record "
-        "is a genuine match for our organization. Return a clean JSON payload matching this schema:\n\n"
+        "Your job is to determine if this search result is a genuine match for our organization or an unrelated false positive.\n\n"
+        f"🎯 SEARCH QUERY CONTEXT MATRIX:\n"
+        f"- Specific Keyword Found: '{keyword_meta.get('term')}'\n"
+        f"- Expected Impact Brands: {keyword_meta.get('brand')}\n"
+        f"- Target Theme Category: '{keyword_meta.get('theme')}'\n\n"
+        "TRIAGE DIRECTION:\n"
+        "- If the text mentions the target keyword but contextually refers to architecture, aviation, finance funds, or anything outside the Canadian auto care/aftermarket industry, set is_genuine_match to false.\n"
+        "- If it is a short, vague snippet containing our keyword and cannot be explicitly verified as noise, give it the benefit of the doubt and set is_genuine_match to true for human review.\n\n"
+        "Return a clean JSON payload matching this schema exactly:\n"
         "{\n"
         "  \"is_genuine_match\": true | false,\n"
-        "  \"gatekeeper_rationale\": \"A short explanation of why this was approved as genuine or rejected as explicit noise.\",\n"
+        "  \"gatekeeper_rationale\": \"A short explanation of why this was approved as genuine or rejected as noise.\",\n"
         "  \"category\": \"Positive\" | \"Neutral\" | \"Negative\" | \"Mixed\",\n"
         "  \"score\": float between -1.0 and 1.0,\n"
         "  \"rationale\": \"Explanation of sentiment analysis score choice.\",\n"
@@ -84,6 +93,7 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
             )
         )
         
+        # Clean response text from potential markdown block wrappers
         clean_text = response.text.strip().lstrip("```json").rstrip("```").strip()
         data = json.loads(clean_text)
         
@@ -91,10 +101,12 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         print(f"🤖 Gemini Evaluation -> Genuine: {is_genuine} | Rationale: {data.get('gatekeeper_rationale')}")
         
         if not is_genuine:
+            # --- PURGE NOISE ---
             supabase.table("mentions").delete().eq("id", mention_id).execute()
             print(f"❌ HARD DELETED noise entry from database: {title[:50]}...")
             return False
             
+        # --- UPDATE VALID RECORD ---
         flags = analyze_quality_and_flags(title + " " + snippet)
         update_payload = {
             "sentiment_category": data.get("category", "Neutral"),
@@ -119,6 +131,14 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         
     except Exception as e:
         print(f"⚠️ Error running processing analytics loop on record {mention_id}: {e}")
+        # If Gemini fails contextual parsing, we update the placeholder to a visible error state for triage visibility
+        try:
+            supabase.table("mentions").update({
+                "sentiment_rationale": f"AI Processing Error: {str(e)}",
+                "ai_action_recommendation": "Review record manually — background processing node validation exception."
+            }).eq("id", mention_id).execute()
+        except Exception:
+            pass
         return True
 
 
@@ -170,7 +190,6 @@ if __name__ == "__main__":
                     else:
                         date_published = datetime.now().date().isoformat()
                     
-                    # FIXED: Added required placeholder fields to satisfy the database constraints!
                     initial_payload = {
                         "title": title,
                         "url": url_link,
@@ -193,7 +212,6 @@ if __name__ == "__main__":
                         db_res = supabase.table("mentions").insert(initial_payload).execute()
                         if db_res.data:
                             inserted_id = db_res.data[0]["id"]
-                            # Hand off to Gemini to overwrite those placeholders OR delete the row
                             kw_meta = {"term": kw["term"], "brand": kw["brand_tags"], "theme": kw["theme_layer"]}
                             process_and_filter_mention_with_gemini(inserted_id, title, snippet, kw_meta)
                     except Exception as db_err:
