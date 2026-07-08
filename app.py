@@ -481,7 +481,7 @@ elif app_mode == "📝 AI Report Builder":
                 end_iso = datetime.combine(target_date, datetime.max.time()).isoformat()
                 
                 # Fetch records that entered the system on this date (Includes pending so recent items can be compiled)
-                raw_data = supabase.table("mentions").select("title, url, outlet_platform, theme, status, recommendation, brands_affected, alert_level").gte("inserted_at", start_iso).lte("inserted_at", end_iso).execute()
+                raw_data = supabase.table("mentions").select("id, title, url, outlet_platform, theme, status, recommendation, brands_affected, alert_level").gte("inserted_at", start_iso).lte("inserted_at", end_iso).execute()
                 
                 if not raw_data.data:
                     st.warning("No media tracking records were processed or logged on this specific date.")
@@ -515,7 +515,7 @@ elif app_mode == "📝 AI Report Builder":
         if st.button("Generate Weekly Trend Document", use_container_width=True):
             with st.spinner("Compiling historical database records for processing with Gemini..."):
                 # Fetches the latest 100 items (Includes pending so recent items can be compiled)
-                raw_data = supabase.table("mentions").select("title, url, outlet_platform, theme, status, recommendation, brands_affected, alert_level").gte("inserted_at", start_iso).lte("inserted_at", end_iso).execute()
+                raw_data = supabase.table("mentions").select("id, title, url, outlet_platform, theme, status, recommendation, brands_affected, alert_level").gte("inserted_at", start_iso).lte("inserted_at", end_iso).execute()
                 
                 if not raw_data.data:
                     st.warning("No validated tracking records discovered.")
