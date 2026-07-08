@@ -173,7 +173,7 @@ app_mode = st.sidebar.radio(
         "📥 Inbox / Triage", 
         "📋 Reviewed Database Table", 
         "🚨 Daily Crisis Center", 
-        "📝 Weekly Summarizer", 
+        "📝 AI Report Builder", 
         "💬 Database Q&A Assistant",
         "⚙️ System Settings Dashboard"
     ]
@@ -480,8 +480,8 @@ elif app_mode == "📝 AI Report Builder":
                 start_iso = datetime.combine(target_date, datetime.min.time()).isoformat()
                 end_iso = datetime.combine(target_date, datetime.max.time()).isoformat()
                 
-                # Fetch records that entered the system on this date and have been processed (no longer pending)
-                raw_data = supabase.table("mentions").select("title, outlet_platform, theme, status, recommendation, brands_affected, alert_level").neq("status", "pending").gte("inserted_at", start_iso).lte("inserted_at", end_iso).execute()
+                # Fetch records that entered the system on this date (Includes pending so recent items can be compiled)
+                raw_data = supabase.table("mentions").select("title, outlet_platform, theme, status, recommendation, brands_affected, alert_level").gte("inserted_at", start_iso).lte("inserted_at", end_iso).execute()
                 
                 if not raw_data.data:
                     st.warning("No media tracking records were processed or logged on this specific date.")
@@ -514,8 +514,8 @@ elif app_mode == "📝 AI Report Builder":
 
         if st.button("Generate Weekly Trend Document", use_container_width=True):
             with st.spinner("Compiling historical database records for processing with Gemini..."):
-                # Fetches the latest 100 processed items regardless of date
-                raw_data = supabase.table("mentions").select("title, outlet_platform, theme, status, recommendation, brands_affected, alert_level").neq("status", "pending").order("inserted_at", desc=True).limit(100).execute()
+                # Fetches the latest 100 items (Includes pending so recent items can be compiled)
+                raw_data = supabase.table("mentions").select("title, outlet_platform, theme, status, recommendation, brands_affected, alert_level").order("inserted_at", desc=True).limit(100).execute()
                 
                 if not raw_data.data:
                     st.warning("No validated tracking records discovered.")
