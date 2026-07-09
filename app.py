@@ -402,7 +402,8 @@ elif app_mode == "📋 Reviewed Database Table":
     # Query constrained directly to the parsed publication date index layer
     response = supabase.table("mentions")\
         .select("*")\
-        .not_in("status", ["pending", "noise"])\
+        .neq("status", "pending")\
+        .neq("status", "noise")\
         .gte("date_published", start_date.isoformat())\
         .lte("date_published", end_date.isoformat())\
         .order("date_published", desc=True).execute()
