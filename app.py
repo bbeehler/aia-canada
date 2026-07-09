@@ -207,6 +207,7 @@ app_mode = st.sidebar.radio(
     [
         "📥 Inbox / Triage", 
         "📋 Reviewed Database Table", 
+        "📞 Media CRM & Inquiries", 
         "🚨 Daily Crisis Center", 
         "📝 AI Report Builder", 
         "💬 Database Q&A Assistant",
@@ -899,3 +900,146 @@ elif app_mode == "⚙️ System Settings Dashboard":
             else:
                 st.info("ℹ️ AI generation structural system prompts are locked and read-only. Modifications are restricted to system Administrators.")
                 st.text_area("Current Active Blueprint Framework", value=current_tmpl["system_instruction_prompt"], height=250, disabled=True)
+
+# --- MODULE 7: MEDIA CRM & INQUIRIES ---
+elif app_mode == "📞 Media CRM & Inquiries":
+    st.subheader("📞 Media Relations CRM & Inquiry Tracker")
+    st.write("Manage reporter relationships, log incoming requests, and attribute published mentions to specific contacts.")
+    
+    crm_tab_inquiries, crm_tab_contacts, crm_tab_link = st.tabs(["📨 Active Inquiries", "📇 Media Rolodex", "🔗 Link Articles to Contacts"])
+    
+    # Fetch contacts for use across tabs
+    contacts_res = supabase.table("media_contacts").select("*").order("full_name").execute()
+    all_contacts = contacts_res.data if contacts_res.data else []
+    contact_options = {f"{c['full_name']} ({c['outlet']})": c['id'] for c in all_contacts}
+
+    # --- TAB 1: INQUIRIES ---
+    with crm_tab_inquiries:
+        col_new_inq, col_active_inq = st.columns([1, 2])
+        
+        with col_new_inq:
+            st.markdown("### 📝 Log New Inquiry")
+            if not all_contacts:
+                st.warning("Please add a Media Contact in the Rolodex tab before logging an inquiry.")
+            else:
+                with st.form("new_inquiry_form", clear_on_submit=True):
+                    selected_contact_label = st.selectbox("Assign to Contact", list(contact_options.keys()))
+                    inq_subject = st.text_input("Request Subject / Topic")
+                    inq_details = st.text_area("Request Details / Questions")
+                    inq_deadline = st.date_input("Deadline Date")
+                    inq_owner = st.selectbox("Assign to Team Member", TEAM_USERS)
+                    
+                    if st.form_submit_button("Log Inquiry & Notify Owner", type="primary"):
+                        if inq_subject.strip():
+                            contact_id = contact_options[selected_contact_label]
+                            
+                            # Insert into database
+                            new_inq = supabase.table("media_inquiries").insert({
+                                "contact_id": contact_id,
+                                "inquiry_subject": inq_subject,
+                                "inquiry_details": inq_details,
+                                "deadline": inq_deadline.isoformat(),
+                                "status": "pending",
+                                "assigned_to_user": inq_owner if inq_owner != "Unassigned" else None
+                            }).execute()
+                            
+                            # Fire internal notification
+                            if inq_owner != "Unassigned":
+                                send_assignment_notification(
+                                    None, # No mention ID for general inquiries
+                                    f"MEDIA INQUIRY: {inq_subject}", 
+                                    inq_owner, 
+                                    st.session_state["user_full_name"], 
+                                    f"New request from {selected_contact_label}. Deadline: {inq_deadline}"
+                                )
+                                
+                            st.success("Inquiry logged successfully!")
+                            st.rerun()
+                        else:
+                            st.error("Subject is required.")
+
+        with col_active_inq:
+            st.markdown("### 📨 Active Ticket Queue")
+            inq_res = supabase.table("media_inquiries").select("*, media_contacts(full_name, outlet)").neq("status", "resolved").order("deadline").execute()
+            
+            if not inq_res.data:
+                st.info("No active media inquiries at this time.")
+            else:
+                for inq in inq_res.data:
+                    contact_info = inq.get("media_contacts", {})
+                    contact_name = contact_info.get("full_name", "Unknown")
+                    outlet = contact_info.get("outlet", "Unknown")
+                    
+                    with st.expander(f"⏳ {inq['deadline'][:10]} | {contact_name} ({outlet}) - {inq['inquiry_subject']}"):
+                        st.write(f"**Details:** {inq['inquiry_details']}")
+                        st.write(f"**Assigned To:** {inq['assigned_to_user'] or 'Unassigned'}")
+                        
+                        i1, i2 = st.columns(2)
+                        with i1:
+                            new_stat = st.selectbox("Update Status", ["pending", "in-progress", "resolved"], index=["pending", "in-progress", "resolved"].index(inq['status']), key=f"stat_{inq['id']}")
+                        with i2:
+                            if st.button("Update Ticket", key=f"upd_{inq['id']}", use_container_width=True):
+                                supabase.table("media_inquiries").update({"status": new_stat}).eq("id", inq['id']).execute()
+                                st.toast("Inquiry status updated!")
+                                st.rerun()
+
+    # --- TAB 2: MEDIA ROLODEX ---
+    with crm_tab_contacts:
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.markdown("### 📇 Add New Contact")
+            with st.form("new_contact_form", clear_on_submit=True):
+                c_name = st.text_input("Full Name*")
+                c_outlet = st.text_input("Primary Outlet / Publication*")
+                c_email = st.text_input("Email Address")
+                c_phone = st.text_input("Phone Number")
+                c_notes = st.text_area("Background Notes (Bias, past interactions, beats)")
+                
+                if st.form_submit_button("Save Contact", type="primary"):
+                    if c_name.strip() and c_outlet.strip():
+                        supabase.table("media_contacts").insert({
+                            "full_name": c_name, "outlet": c_outlet, "email": c_email, 
+                            "phone": c_phone, "background_notes": c_notes
+                        }).execute()
+                        st.success(f"{c_name} added to Rolodex!")
+                        st.rerun()
+                    else:
+                        st.error("Name and Outlet are required.")
+                        
+        with c2:
+            st.markdown("### 📂 Database Directory")
+            if all_contacts:
+                contact_df = pd.DataFrame(all_contacts)[["full_name", "outlet", "email", "phone"]]
+                contact_df.columns = ["Name", "Outlet", "Email", "Phone"]
+                st.dataframe(contact_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("Rolodex is currently empty.")
+
+    # --- TAB 3: LINKING ARTICLES TO CONTACTS ---
+    with crm_tab_link:
+        st.markdown("### 🔗 Attribute Mentions to Reporters")
+        st.write("Link a published article in your database to a specific media contact to track their historical coverage of AIA Canada.")
+        
+        if not all_contacts:
+            st.warning("Please add contacts to the Rolodex first.")
+        else:
+            # Fetch recent unlinked mentions
+            unlinked_res = supabase.table("mentions").select("id, title, outlet_platform, date_published").is_("author_contact_id", "null").order("date_published", desc=True).limit(50).execute()
+            
+            if not unlinked_res.data:
+                st.success("All recent mentions have been successfully attributed to an author!")
+            else:
+                l1, l2 = st.columns(2)
+                with l1:
+                    mention_options = {f"{m['date_published']} | {m['outlet_platform']} - {m['title'][:40]}...": m['id'] for m in unlinked_res.data}
+                    selected_mention_label = st.selectbox("Select Unlinked Article", list(mention_options.keys()))
+                with l2:
+                    selected_author_label = st.selectbox("Select Author from Rolodex", list(contact_options.keys()))
+                
+                if st.button("🔗 Link Article to Author", type="primary"):
+                    m_id = mention_options[selected_mention_label]
+                    c_id = contact_options[selected_author_label]
+                    
+                    supabase.table("mentions").update({"author_contact_id": c_id}).eq("id", m_id).execute()
+                    st.toast("Article successfully linked to contact!")
+                    st.rerun()
