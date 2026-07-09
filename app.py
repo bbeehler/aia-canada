@@ -241,9 +241,10 @@ if st.session_state["user_full_name"]:
                 st.info(f"💬 {n['message']}")
                 
                 # Use a button to safely update the URL without refreshing the page
-                if st.button("🔗 Open Direct Record Viewer", key=f"view_{n['id']}", use_container_width=True):
-                    st.query_params["mention_id"] = n['mention_id']
-                    st.rerun()
+                if n.get('mention_id'):
+                    if st.button("🔗 Open Direct Record Viewer", key=f"view_{n['id']}", use_container_width=True):
+                        st.query_params["mention_id"] = n['mention_id']
+                        st.rerun()
                 
                 if st.button("✅ Mark as Read", key=f"read_{n['id']}", use_container_width=True):
                     supabase.table("notifications").update({"is_read": True}).eq("id", n['id']).execute()
@@ -1071,6 +1072,7 @@ elif app_mode == "📞 Media CRM & Inquiries":
     # --- TAB 2: MEDIA ROLODEX ---
     with crm_tab_contacts:
         c1, c2 = st.columns([1, 2])
+        
         with c1:
             st.markdown("### 📇 Add New Contact")
             with st.form("new_contact_form", clear_on_submit=True):
@@ -1092,13 +1094,77 @@ elif app_mode == "📞 Media CRM & Inquiries":
                         st.error("Name and Outlet are required.")
                         
         with c2:
-            st.markdown("### 📂 Database Directory")
+            st.markdown("### 📂 Contact Profiles & History")
             if all_contacts:
-                contact_df = pd.DataFrame(all_contacts)[["full_name", "outlet", "email", "phone"]]
-                contact_df.columns = ["Name", "Outlet", "Email", "Phone"]
-                st.dataframe(contact_df, use_container_width=True, hide_index=True)
+                selected_profile_label = st.selectbox("Search / Select a Contact Profile", list(contact_options.keys()))
+                profile_id = contact_options[selected_profile_label]
+                
+                # Retrieve the selected contact's details
+                profile_data = next((c for c in all_contacts if c['id'] == profile_id), None)
+                
+                st.markdown(f"#### 👤 {profile_data['full_name']} ({profile_data['outlet']})")
+                st.write(f"📧 **Email:** {profile_data['email'] or 'N/A'} | 📞 **Phone:** {profile_data['phone'] or 'N/A'}")
+                st.caption(f"**Internal Notes:** {profile_data['background_notes'] or 'None provided.'}")
+                
+                st.markdown("---")
+                st.markdown("#### 📨 Inquiry History")
+                
+                # Fetch their entire history of inquiries
+                inq_hist = supabase.table("media_inquiries").select("*").eq("contact_id", profile_id).order("deadline", desc=True).execute()
+                
+                if not inq_hist.data:
+                    st.info("No inquiries logged for this contact.")
+                else:
+                    for inq in inq_hist.data:
+                        # Color code the status symbol
+                        stat_icon = "🟢" if inq['status'] == "resolved" else "🟡" if inq['status'] == "in-progress" else "🔴"
+                        
+                        with st.expander(f"{stat_icon} [{inq['status'].upper()}] {inq['deadline'][:10]} - {inq['inquiry_subject']}"):
+                            st.write(f"**Details:** {inq['inquiry_details']}")
+                            
+                            # Form to update status and re-assign
+                            i_col1, i_col2, i_col3 = st.columns(3)
+                            with i_col1:
+                                edit_inq_stat = st.selectbox("Update Status", ["pending", "in-progress", "resolved"], index=["pending", "in-progress", "resolved"].index(inq['status']), key=f"p_stat_{inq['id']}")
+                            with i_col2:
+                                current_inq_owner = inq['assigned_to_user'] if inq['assigned_to_user'] in TEAM_USERS else "Unassigned"
+                                edit_inq_owner = st.selectbox("Assignee", TEAM_USERS, index=TEAM_USERS.index(current_inq_owner), key=f"p_owner_{inq['id']}")
+                            with i_col3:
+                                inq_note = st.text_input("Ping Note to Assignee (Optional)", key=f"p_note_{inq['id']}")
+                                
+                            if st.button("Save & Notify Team", key=f"p_btn_{inq['id']}", use_container_width=True):
+                                current_user_name = st.session_state["user_full_name"]
+                                
+                                supabase.table("media_inquiries").update({
+                                    "status": edit_inq_stat,
+                                    "assigned_to_user": edit_inq_owner if edit_inq_owner != "Unassigned" else None
+                                }).eq("id", inq['id']).execute()
+                                
+                                # Send notification if assigned to someone
+                                if edit_inq_owner != "Unassigned":
+                                    ping_msg = inq_note if inq_note.strip() else f"Inquiry status updated to {edit_inq_stat}."
+                                    send_assignment_notification(
+                                        None, 
+                                        f"MEDIA INQUIRY: {inq['inquiry_subject']}", 
+                                        edit_inq_owner, 
+                                        current_user_name, 
+                                        ping_msg
+                                    )
+                                st.toast("Inquiry updated successfully!")
+                                st.rerun()
+                                
+                st.markdown("#### 📰 Published Articles Linked")
+                # Fetch all published articles attributed to this author
+                mentions_hist = supabase.table("mentions").select("title, outlet_platform, date_published, url").eq("author_contact_id", profile_id).order("date_published", desc=True).execute()
+                
+                if not mentions_hist.data:
+                    st.caption("No articles have been linked to this author yet.")
+                else:
+                    for mh in mentions_hist.data:
+                        st.markdown(f"- **{mh['date_published']}** | [{mh['title']}]({mh['url']}) - *{mh['outlet_platform']}*")
+                        
             else:
-                st.info("Rolodex is currently empty.")
+                st.info("Rolodex is currently empty. Add a contact on the left to begin building profiles.")
 
     # --- TAB 3: LINKING ARTICLES TO CONTACTS ---
     with crm_tab_link:
