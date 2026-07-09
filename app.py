@@ -107,8 +107,7 @@ def add_action_note(mention_id, note_text, user):
             st.error(f"Failed to record note: {e}")
 
 def send_assignment_notification(mention_id, mention_title, recipient, sender, message):
-    if recipient and recipient != "Unassigned" and recipient != sender:
-        # Fallback message if they didn't write a custom note
+    if recipient and recipient != "Unassigned":
         final_message = message if message.strip() else "Please review this newly assigned mention."
         try:
             supabase.table("notifications").insert({
@@ -406,8 +405,8 @@ if app_mode == "📥 Inbox / Triage":
                         if note_text.strip():
                             add_action_note(m['id'], f"Initial Triage Note: {note_text}", current_user_name)
                         
-                        # Trigger the new notification if assigned to someone else
-                        if assignee != "Unassigned" and assignee != current_user_name:
+                        # Trigger the new notification
+                        if assignee != "Unassigned":
                             send_assignment_notification(m['id'], m['title'], assignee, current_user_name, note_text)
                         
                         supabase.table("mentions").update({
