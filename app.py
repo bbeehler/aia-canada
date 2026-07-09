@@ -77,7 +77,7 @@ IS_ADMIN = USER_ROLE == "Administrator"
 IS_MANAGER = USER_ROLE == "Editor"  
 IS_VIEWER = USER_ROLE == "Viewer"
 
-ef load_active_team_users():
+def load_active_team_users():
     try:
         res = supabase.table("monitor_users").select("full_name").order("full_name").execute()
         return ["Unassigned"] + [row["full_name"] for row in res.data]
@@ -341,7 +341,6 @@ if "mention_id" in st.query_params:
                 st.rerun()
     st.stop() # This entirely pauses the rest of the app from rendering while viewing a deep link!
 
-
 # --- 3. MODULE 1: INBOX / TRIAGE ---
 if app_mode == "📥 Inbox / Triage":
     st.subheader("📥 Unprocessed Mention Queue")
@@ -382,6 +381,9 @@ if app_mode == "📥 Inbox / Triage":
             
         st.markdown("### 📄 Detailed Classification Workspaces")
         for m in mentions:
+            # INJECTED HTML ANCHOR TARGET FOR REPORT DEEP LINKS
+            st.markdown(f'<div id="{m["id"]}"></div>', unsafe_allow_html=True)
+            
             with st.expander(f"🔍 {m['outlet_platform']} | {m['title']} (Published: {m['date_published']})"):
                 st.info(f"🤖 **Gemini Strategic Action Recommendation:** {m.get('ai_action_recommendation', 'N/A')}")
                 
@@ -410,12 +412,41 @@ if app_mode == "📥 Inbox / Triage":
                 
                 note_text = st.text_input("Log Action Taken / Progress Note:", key=f"note_input_{m['id']}", placeholder="Type out workflow changes or notes here...", disabled=IS_VIEWER)
                 
+                # --- NEW AUTHOR ATTRIBUTION BLOCK ---
+                st.markdown("#### ✍️ Author Attribution")
+                current_auth_label = "Unassigned"
+                if m.get('author_contact_id'):
+                    match = next((c for c in MEDIA_CONTACTS if c['id'] == m['author_contact_id']), None)
+                    if match:
+                        current_auth_label = f"{match['full_name']} ({match['outlet']})"
+                
+                author_sel = st.selectbox("Assign to Media Contact", CONTACT_NAMES, index=CONTACT_NAMES.index(current_auth_label) if current_auth_label in CONTACT_NAMES else 0, key=f"auth_{m['id']}", disabled=IS_VIEWER)
+                
+                new_auth_name, new_auth_outlet = "", ""
+                if author_sel == "➕ Add New Contact...":
+                    a1, a2 = st.columns(2)
+                    with a1:
+                        new_auth_name = st.text_input("New Contact Name*", key=f"new_name_{m['id']}")
+                    with a2:
+                        new_auth_outlet = st.text_input("New Contact Outlet*", key=f"new_out_{m['id']}")
+                
                 st.markdown("---")
                 b1, b2, b3 = st.columns([2, 2, 1])
                 with b1:
                     if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
                         determined_status = "escalated" if new_level in ["High", "Critical"] else "logged"
                         current_user_name = st.session_state["user_full_name"]
+                        
+                        # Process Inline Author Creation
+                        final_contact_id = m.get('author_contact_id')
+                        if author_sel == "Unassigned":
+                            final_contact_id = None
+                        elif author_sel == "➕ Add New Contact...":
+                            if new_auth_name.strip() and new_auth_outlet.strip():
+                                new_c = supabase.table("media_contacts").insert({"full_name": new_auth_name.strip(), "outlet": new_auth_outlet.strip()}).execute()
+                                final_contact_id = new_c.data[0]['id']
+                        else:
+                            final_contact_id = CONTACT_MAP[author_sel]
                         
                         if note_text.strip():
                             add_action_note(m['id'], f"Initial Triage Note: {note_text}", current_user_name)
@@ -429,13 +460,14 @@ if app_mode == "📥 Inbox / Triage":
                             "alert_level": new_level,
                             "status": determined_status,
                             "assigned_to_user": assignee if assignee != "Unassigned" else None,
-                            "escalated_to_user": escalation_target if escalation_target != "Unassigned" else None
+                            "escalated_to_user": escalation_target if escalation_target != "Unassigned" else None,
+                            "author_contact_id": final_contact_id
                         }).eq("id", m['id']).execute()
                         st.rerun()
                 with b2:
                     if st.button("Add Progress Note Only", key=f"note_btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
                         if note_text.strip():
-                            add_action_note(m['id'], note_text, assignee)
+                            add_action_note(m['id'], note_text, current_user_name)
                             st.rerun()
                         else:
                             st.error("Note text field cannot be blank.")
@@ -496,6 +528,9 @@ elif app_mode == "📋 Reviewed Database Table":
                 selected_row_idx = selection["selection"]["rows"][0]
                 target_record = df.iloc[selected_row_idx].to_dict()
                 
+                # INJECTED HTML ANCHOR TARGET FOR REPORT LINKS
+                st.markdown(f'<div id="{target_record["id"]}"></div>', unsafe_allow_html=True)
+                
                 st.markdown(f"### 📄 Full Metadata Profile: `{target_record['title']}`")
                 st.info(f"🤖 **Gemini Strategic Action Recommendation for this Mention:** {target_record.get('ai_action_recommendation', 'N/A')}")
                 
@@ -553,16 +588,54 @@ elif app_mode == "📋 Reviewed Database Table":
                     
                 edit_note = st.text_input("Type new action note to append to history trail:", key="edit_note_input", disabled=IS_VIEWER)
                 
+                # --- NEW AUTHOR ATTRIBUTION BLOCK ---
+                st.markdown("#### ✍️ Author Attribution")
+                current_auth_label = "Unassigned"
+                if target_record.get('author_contact_id'):
+                    match = next((c for c in MEDIA_CONTACTS if c['id'] == target_record['author_contact_id']), None)
+                    if match:
+                        current_auth_label = f"{match['full_name']} ({match['outlet']})"
+                
+                author_sel = st.selectbox("Assign to Media Contact", CONTACT_NAMES, index=CONTACT_NAMES.index(current_auth_label) if current_auth_label in CONTACT_NAMES else 0, key=f"edit_auth_{target_record['id']}", disabled=IS_VIEWER)
+                
+                new_auth_name, new_auth_outlet = "", ""
+                if author_sel == "➕ Add New Contact...":
+                    a1, a2 = st.columns(2)
+                    with a1:
+                        new_auth_name = st.text_input("New Contact Name*", key=f"edit_new_name_{target_record['id']}")
+                    with a2:
+                        new_auth_outlet = st.text_input("New Contact Outlet*", key=f"edit_new_out_{target_record['id']}")
+                
+                st.markdown("---")
                 m1, m2 = st.columns([1, 4])
                 with m1:
                     if st.button("Save Changes", type="primary", use_container_width=True, key="save_changes_btn", disabled=IS_VIEWER):
+                        current_user_name = st.session_state["user_full_name"]
+                        
+                        # Process Inline Author Creation
+                        final_contact_id = target_record.get('author_contact_id')
+                        if author_sel == "Unassigned":
+                            final_contact_id = None
+                        elif author_sel == "➕ Add New Contact...":
+                            if new_auth_name.strip() and new_auth_outlet.strip():
+                                new_c = supabase.table("media_contacts").insert({"full_name": new_auth_name.strip(), "outlet": new_auth_outlet.strip()}).execute()
+                                final_contact_id = new_c.data[0]['id']
+                        else:
+                            final_contact_id = CONTACT_MAP[author_sel]
+                            
                         if edit_note.strip():
-                            add_action_note(target_record['id'], edit_note, edit_user)
+                            add_action_note(target_record['id'], edit_note, current_user_name)
+                            
+                        # Trigger notification if reassigning or updating someone else's active ticket
+                        if edit_user != "Unassigned":
+                            send_assignment_notification(target_record['id'], target_record['title'], edit_user, current_user_name, edit_note)
+                            
                         supabase.table("mentions").update({
                             "recommendation": edit_rec,
                             "alert_level": edit_lvl,
                             "status": edit_stat,
-                            "assigned_to_user": edit_user if edit_user != "Unassigned" else None
+                            "assigned_to_user": edit_user if edit_user != "Unassigned" else None,
+                            "author_contact_id": final_contact_id
                         }).eq("id", target_record['id']).execute()
                         st.rerun()
                 with m2:
