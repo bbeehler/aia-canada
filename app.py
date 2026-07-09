@@ -802,8 +802,8 @@ elif app_mode == "📝 AI Report Builder":
             st.markdown(st.session_state["latest_weekly_report"])
 
 # --- MODULE 5: DATABASE Q&A ASSISTANT ---
-elif app_mode == "💬 Database Q&A Assistant":
-    st.subheader("💬 Ask Your Media Monitoring Database")
+elif app_mode == "💬 Ask AIA Media":
+    st.subheader("💬 Ask AIA Media")
     user_query = st.text_input("Enter your tracking question:", placeholder="Ask about trends, owners, or entries...")
     
     if user_query:
