@@ -399,26 +399,22 @@ if app_mode == "📥 Inbox / Triage":
                 st.markdown("---")
                 b1, b2, b3 = st.columns([2, 2, 1])
                 with b1:
-                    if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
-    determined_status = "escalated" if new_level in ["High", "Critical"] else "logged"
-    current_user_name = st.session_state["user_full_name"]
+                    if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER): determined_status = "escalated" if new_level in ["High", "Critical"] else "logged" current_user_name = st.session_state["user_full_name"]
+                        if note_text.strip():
+                            add_action_note(m['id'], f"Initial Triage Note: {note_text}", current_user_name)
+                            # Trigger the new notification if assigned to someone else
+                        if assignee != "Unassigned" and assignee != current_user_name:
+                            send_assignment_notification(m['id'], m['title'], assignee, current_user_name, note_text)
     
-    if note_text.strip():
-        add_action_note(m['id'], f"Initial Triage Note: {note_text}", current_user_name)
-    
-    # Trigger the new notification if assigned to someone else
-    if assignee != "Unassigned" and assignee != current_user_name:
-        send_assignment_notification(m['id'], m['title'], assignee, current_user_name, note_text)
-    
-    supabase.table("mentions").update({
-        "recommendation": new_rec,
-        "alert_level": new_level,
-        "status": determined_status,
-        "assigned_to_user": assignee if assignee != "Unassigned" else None,
-        "escalated_to_user": escalation_target if escalation_target != "Unassigned" else None
-    }).eq("id", m['id']).execute()
-    
-    st.rerun()
+                            supabase.table("mentions").update({
+                            "recommendation": new_rec,
+                            "alert_level": new_level,
+                            "status": determined_status,
+                            "assigned_to_user": assignee if assignee != "Unassigned" else None,
+                            "escalated_to_user": escalation_target if escalation_target != "Unassigned" else None
+                        }).eq("id", m['id']).execute()
+                        
+                        st.rerun()
                 with b2:
                     if st.button("Add Progress Note Only", key=f"note_btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
                         if note_text.strip():
