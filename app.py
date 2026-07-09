@@ -226,8 +226,8 @@ app_mode = st.sidebar.radio(
         "📋 Reviewed Database Table", 
         "📞 Media CRM & Inquiries", 
         "🚨 Daily Crisis Center", 
-        "📝 AI Report Builder", 
-        "💬 Database Q&A Assistant",
+        "📝 Report Builder", 
+        "💬 Ask AIA Media",
         "⚙️ System Settings Dashboard"
     ]
 )
