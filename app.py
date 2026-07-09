@@ -1057,16 +1057,77 @@ elif app_mode == "📞 Media CRM & Inquiries":
                     outlet = contact_info.get("outlet", "Unknown")
                     
                     with st.expander(f"⏳ {inq['deadline'][:10]} | {contact_name} ({outlet}) - {inq['inquiry_subject']}"):
-                        st.write(f"**Details:** {inq['inquiry_details']}")
-                        st.write(f"**Assigned To:** {inq['assigned_to_user'] or 'Unassigned'}")
                         
-                        i1, i2 = st.columns(2)
-                        with i1:
-                            new_stat = st.selectbox("Update Status", ["pending", "in-progress", "resolved"], index=["pending", "in-progress", "resolved"].index(inq['status']), key=f"stat_{inq['id']}")
-                        with i2:
-                            if st.button("Update Ticket", key=f"upd_{inq['id']}", use_container_width=True):
-                                supabase.table("media_inquiries").update({"status": new_stat}).eq("id", inq['id']).execute()
-                                st.toast("Inquiry status updated!")
+                        st.markdown("#### 📜 Activity & Notes History")
+                        # Fetch the timestamped history trail
+                        hist_res = supabase.table("inquiry_actions").select("*").eq("inquiry_id", inq['id']).order("inserted_at", desc=True).execute()
+                        if not hist_res.data:
+                            st.caption("No notes logged for this inquiry yet.")
+                        else:
+                            hist_df = pd.DataFrame(hist_res.data)
+                            hist_df = hist_df.rename(columns={"inserted_at": "Timestamp", "performed_by": "User", "action_note": "Note details"})
+                            st.table(hist_df[["Timestamp", "User", "Note details"]])
+                            
+                        st.markdown("#### ✏️ Edit Ticket Details & Add Notes")
+                        edit_subj = st.text_input("Subject", value=inq['inquiry_subject'], key=f"subj_{inq['id']}")
+                        edit_det = st.text_area("Details", value=inq.get('inquiry_details', ''), key=f"det_{inq['id']}")
+                        
+                        col_a, col_b, col_c = st.columns(3)
+                        with col_a:
+                            try:
+                                current_dl = datetime.fromisoformat(inq['deadline'].replace('Z', '+00:00')).date()
+                            except Exception:
+                                current_dl = datetime.now().date()
+                            edit_dl = st.date_input("Deadline", value=current_dl, key=f"dl_{inq['id']}")
+                        with col_b:
+                            edit_stat = st.selectbox("Status", ["pending", "in-progress", "resolved"], index=["pending", "in-progress", "resolved"].index(inq['status']), key=f"stat_{inq['id']}")
+                        with col_c:
+                            outcomes_list = ["Pending", "Interview Scheduled", "Mention Published", "Declined/Passed", "Other"]
+                            current_out = inq.get('outcome') or "Pending"
+                            if current_out not in outcomes_list:
+                                outcomes_list.append(current_out)
+                            edit_out = st.selectbox("Outcome", outcomes_list, index=outcomes_list.index(current_out), key=f"out_{inq['id']}")
+                            
+                        col_d, col_e = st.columns(2)
+                        with col_d:
+                            current_owner = inq['assigned_to_user'] if inq['assigned_to_user'] in TEAM_USERS else "Unassigned"
+                            edit_owner = st.selectbox("Assignee", TEAM_USERS, index=TEAM_USERS.index(current_owner), key=f"owner_{inq['id']}")
+                        with col_e:
+                            new_note = st.text_input("Log New Action/Note to History", key=f"note_{inq['id']}", placeholder="Type an update here...")
+                            
+                        st.markdown("---")
+                        b1, b2 = st.columns([3, 1])
+                        with b1:
+                            if st.button("Save Ticket Changes & Post Note", key=f"save_{inq['id']}", type="primary", use_container_width=True):
+                                current_user_name = st.session_state["user_full_name"]
+                                
+                                # Append new note to history if they typed one
+                                if new_note.strip():
+                                    supabase.table("inquiry_actions").insert({
+                                        "inquiry_id": inq['id'],
+                                        "action_note": new_note.strip(),
+                                        "performed_by": current_user_name
+                                    }).execute()
+                                    
+                                # Fire Notification if you re-assigned the ticket to a new person
+                                if edit_owner != "Unassigned" and edit_owner != current_owner:
+                                    send_assignment_notification(None, f"MEDIA INQUIRY: {edit_subj}", edit_owner, current_user_name, f"Ticket assigned to you. Note: {new_note}")
+                                    
+                                # Push core changes to the database
+                                supabase.table("media_inquiries").update({
+                                    "inquiry_subject": edit_subj,
+                                    "inquiry_details": edit_det,
+                                    "deadline": edit_dl.isoformat(),
+                                    "status": edit_stat,
+                                    "outcome": edit_out,
+                                    "assigned_to_user": edit_owner if edit_owner != "Unassigned" else None
+                                }).eq("id", inq['id']).execute()
+                                
+                                st.toast("Ticket updated successfully!")
+                                st.rerun()
+                        with b2:
+                            if st.button("🗑️ Delete", key=f"del_{inq['id']}", type="secondary", use_container_width=True):
+                                supabase.table("media_inquiries").delete().eq("id", inq['id']).execute()
                                 st.rerun()
 
     # --- TAB 2: MEDIA ROLODEX ---
