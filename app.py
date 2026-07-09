@@ -77,7 +77,7 @@ IS_ADMIN = USER_ROLE == "Administrator"
 IS_MANAGER = USER_ROLE == "Editor"  
 IS_VIEWER = USER_ROLE == "Viewer"
 
-def load_active_team_users():
+ef load_active_team_users():
     try:
         res = supabase.table("monitor_users").select("full_name").order("full_name").execute()
         return ["Unassigned"] + [row["full_name"] for row in res.data]
@@ -85,6 +85,18 @@ def load_active_team_users():
         return ["Unassigned", "Brian Beehler", "Emily Chung"]
 
 TEAM_USERS = load_active_team_users()
+
+# --- NEW GLOBAL CONTACT LOADER ---
+def load_media_contacts():
+    try:
+        res = supabase.table("media_contacts").select("id, full_name, outlet").order("full_name").execute()
+        return res.data if res.data else []
+    except Exception:
+        return []
+
+MEDIA_CONTACTS = load_media_contacts()
+CONTACT_NAMES = ["Unassigned", "➕ Add New Contact..."] + [f"{c['full_name']} ({c['outlet']})" for c in MEDIA_CONTACTS]
+CONTACT_MAP = {f"{c['full_name']} ({c['outlet']})": c['id'] for c in MEDIA_CONTACTS}
 
 # --- GLOBAL UTILITY OPERATIONS ---
 def delete_mention_record(record_id):
@@ -1024,26 +1036,30 @@ elif app_mode == "📞 Media CRM & Inquiries":
         
         with col_link:
             st.markdown("#### 📡 Link Existing Scraped Article")
-            if not all_contacts:
-                st.warning("Please add contacts to the Rolodex first.")
-            else:
-                unlinked_res = supabase.table("mentions").select("id, title, outlet_platform, date_published").is_("author_contact_id", "null").order("date_published", desc=True).limit(50).execute()
+            search_unlinked = st.text_input("🔍 Search Unlinked Articles", placeholder="Type a keyword from the title...")
+            
+            # Filter database using the search term if provided
+            query = supabase.table("mentions").select("id, title, outlet_platform, date_published").is_("author_contact_id", "null")
+            if search_unlinked:
+                query = query.ilike("title", f"%{search_unlinked}%")
                 
-                if not unlinked_res.data:
-                    st.success("All recent mentions have been successfully attributed to an author!")
-                else:
-                    with st.form("link_existing_form"):
-                        mention_options = {f"{m['date_published']} | {m['outlet_platform']} - {m['title'][:35]}...": m['id'] for m in unlinked_res.data}
-                        selected_mention_label = st.selectbox("Select Unlinked Article", list(mention_options.keys()))
-                        selected_author_label = st.selectbox("Select Author from Rolodex", list(contact_options.keys()))
+            unlinked_res = query.order("date_published", desc=True).limit(50).execute()
+            
+            if not unlinked_res.data:
+                st.success("No unlinked mentions found matching that search!")
+            else:
+                with st.form("link_existing_form"):
+                    mention_options = {f"{m['date_published']} | {m['outlet_platform']} - {m['title'][:35]}...": m['id'] for m in unlinked_res.data}
+                    selected_mention_label = st.selectbox("Select Unlinked Article", list(mention_options.keys()))
+                    selected_author_label = st.selectbox("Select Author from Rolodex", [name for name in CONTACT_NAMES if name not in ["Unassigned", "➕ Add New Contact..."]])
+                    
+                    if st.form_submit_button("🔗 Link Article to Author", type="primary", use_container_width=True):
+                        m_id = mention_options[selected_mention_label]
+                        c_id = CONTACT_MAP[selected_author_label]
                         
-                        if st.form_submit_button("🔗 Link Article to Author", type="primary", use_container_width=True):
-                            m_id = mention_options[selected_mention_label]
-                            c_id = contact_options[selected_author_label]
-                            
-                            supabase.table("mentions").update({"author_contact_id": c_id}).eq("id", m_id).execute()
-                            st.toast("Article successfully linked to contact!")
-                            st.rerun()
+                        supabase.table("mentions").update({"author_contact_id": c_id}).eq("id", m_id).execute()
+                        st.toast("Article successfully linked to contact!")
+                        st.rerun()
 
         with col_manual:
             st.markdown("#### ➕ Manually Add Missing Article")
