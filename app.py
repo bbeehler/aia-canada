@@ -106,6 +106,20 @@ def add_action_note(mention_id, note_text, user):
         except Exception as e:
             st.error(f"Failed to record note: {e}")
 
+def send_assignment_notification(mention_id, mention_title, recipient, sender, message):
+    if recipient and recipient != "Unassigned" and recipient != sender:
+        # Fallback message if they didn't write a custom note
+        final_message = message if message.strip() else "Please review this newly assigned mention."
+        try:
+            supabase.table("notifications").insert({
+                "recipient_name": recipient,
+                "sender_name": sender,
+                "mention_id": mention_id,
+                "mention_title": mention_title,
+                "message": final_message
+            }).execute()
+        except Exception as e:
+            st.error(f"Failed to send notification: {e}")
 
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
 st.sidebar.title("📊 AIA Canada Monitor")
@@ -200,6 +214,30 @@ app_mode = st.sidebar.radio(
         "⚙️ System Settings Dashboard"
     ]
 )
+
+st.sidebar.markdown("---")
+# --- 🔔 IN-APP NOTIFICATION CENTER ---
+if st.session_state["user_full_name"]:
+    notif_res = supabase.table("notifications").select("*").eq("recipient_name", st.session_state["user_full_name"]).eq("is_read", False).order("created_at", desc=True).execute()
+    unread_count = len(notif_res.data) if notif_res.data else 0
+    
+    if unread_count > 0:
+        with st.sidebar.expander(f"🔔 Notifications ({unread_count} Unread)", expanded=True):
+            for n in notif_res.data:
+                st.markdown(f"**From:** {n['sender_name']}")
+                st.caption(f"*{n['mention_title'][:40]}...*")
+                st.info(f"💬 {n['message']}")
+                
+                # Utilizes the Deep Link logic we built earlier!
+                st.markdown(f"[🔗 Open Direct Record Viewer](/?mention_id={n['mention_id']})")
+                
+                if st.button("✅ Mark as Read", key=f"read_{n['id']}", use_container_width=True):
+                    supabase.table("notifications").update({"is_read": True}).eq("id", n['id']).execute()
+                    st.rerun()
+                st.markdown("---")
+    else:
+        st.sidebar.info("🔔 All caught up! No new notifications.")
+st.sidebar.markdown("---")
 
 # --- 🚀 URL DEEP LINK INTERCEPTOR ---
 if "mention_id" in st.query_params:
@@ -362,18 +400,25 @@ if app_mode == "📥 Inbox / Triage":
                 b1, b2, b3 = st.columns([2, 2, 1])
                 with b1:
                     if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
-                        determined_status = "escalated" if new_level in ["High", "Critical"] else "logged"
-                        if note_text.strip():
-                            add_action_note(m['id'], f"Initial Triage Note: {note_text}", assignee)
-                        
-                        supabase.table("mentions").update({
-                            "recommendation": new_rec,
-                            "alert_level": new_level,
-                            "status": determined_status,
-                            "assigned_to_user": assignee if assignee != "Unassigned" else None,
-                            "escalated_to_user": escalation_target if escalation_target != "Unassigned" else None
-                        }).eq("id", m['id']).execute()
-                        st.rerun()
+    determined_status = "escalated" if new_level in ["High", "Critical"] else "logged"
+    current_user_name = st.session_state["user_full_name"]
+    
+    if note_text.strip():
+        add_action_note(m['id'], f"Initial Triage Note: {note_text}", current_user_name)
+    
+    # Trigger the new notification if assigned to someone else
+    if assignee != "Unassigned" and assignee != current_user_name:
+        send_assignment_notification(m['id'], m['title'], assignee, current_user_name, note_text)
+    
+    supabase.table("mentions").update({
+        "recommendation": new_rec,
+        "alert_level": new_level,
+        "status": determined_status,
+        "assigned_to_user": assignee if assignee != "Unassigned" else None,
+        "escalated_to_user": escalation_target if escalation_target != "Unassigned" else None
+    }).eq("id", m['id']).execute()
+    
+    st.rerun()
                 with b2:
                     if st.button("Add Progress Note Only", key=f"note_btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
                         if note_text.strip():
