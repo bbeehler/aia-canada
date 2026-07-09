@@ -853,17 +853,27 @@ elif app_mode == "⚙️ System Settings Dashboard":
                 if st.form_submit_button("Provision User Account"):
                     if new_full_name.strip() and new_email.strip() and len(new_password) >= 6:
                         try:
-                            auth_res = supabase.auth.admin.create_user({
+                            # --- ADMIN OVERRIDE FOR USER CREATION ---
+                            # This bypasses the security blocker by using your Service Role Key
+                            admin_client = create_client(
+                                st.secrets["SUPABASE_URL"], 
+                                st.secrets["SUPABASE_SERVICE_ROLE_KEY"] 
+                            )
+                            
+                            auth_res = admin_client.auth.admin.create_user({
                                 "email": new_email,
                                 "password": new_password,
                                 "email_confirm": True
                             })
+                            
+                            # Log them into your app's user dropdown roster
                             supabase.table("monitor_users").insert({
                                 "user_id": auth_res.user.id,
                                 "full_name": new_full_name,
                                 "tracking_email": new_email,
                                 "user_role": new_role
                             }).execute()
+                            
                             st.success(f"Successfully provisioned login access for {new_full_name}!")
                             st.rerun()
                         except Exception as err:
