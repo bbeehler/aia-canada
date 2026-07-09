@@ -1018,28 +1018,67 @@ elif app_mode == "📞 Media CRM & Inquiries":
     # --- TAB 3: LINKING ARTICLES TO CONTACTS ---
     with crm_tab_link:
         st.markdown("### 🔗 Attribute Mentions to Reporters")
-        st.write("Link a published article in your database to a specific media contact to track their historical coverage of AIA Canada.")
+        st.write("Link a published article in your database to a specific media contact, or manually log coverage that the automated scraper missed.")
         
-        if not all_contacts:
-            st.warning("Please add contacts to the Rolodex first.")
-        else:
-            # Fetch recent unlinked mentions
-            unlinked_res = supabase.table("mentions").select("id, title, outlet_platform, date_published").is_("author_contact_id", "null").order("date_published", desc=True).limit(50).execute()
-            
-            if not unlinked_res.data:
-                st.success("All recent mentions have been successfully attributed to an author!")
+        col_link, col_manual = st.columns(2)
+        
+        with col_link:
+            st.markdown("#### 📡 Link Existing Scraped Article")
+            if not all_contacts:
+                st.warning("Please add contacts to the Rolodex first.")
             else:
-                l1, l2 = st.columns(2)
-                with l1:
-                    mention_options = {f"{m['date_published']} | {m['outlet_platform']} - {m['title'][:40]}...": m['id'] for m in unlinked_res.data}
-                    selected_mention_label = st.selectbox("Select Unlinked Article", list(mention_options.keys()))
-                with l2:
-                    selected_author_label = st.selectbox("Select Author from Rolodex", list(contact_options.keys()))
+                unlinked_res = supabase.table("mentions").select("id, title, outlet_platform, date_published").is_("author_contact_id", "null").order("date_published", desc=True).limit(50).execute()
                 
-                if st.button("🔗 Link Article to Author", type="primary"):
-                    m_id = mention_options[selected_mention_label]
-                    c_id = contact_options[selected_author_label]
+                if not unlinked_res.data:
+                    st.success("All recent mentions have been successfully attributed to an author!")
+                else:
+                    with st.form("link_existing_form"):
+                        mention_options = {f"{m['date_published']} | {m['outlet_platform']} - {m['title'][:35]}...": m['id'] for m in unlinked_res.data}
+                        selected_mention_label = st.selectbox("Select Unlinked Article", list(mention_options.keys()))
+                        selected_author_label = st.selectbox("Select Author from Rolodex", list(contact_options.keys()))
+                        
+                        if st.form_submit_button("🔗 Link Article to Author", type="primary", use_container_width=True):
+                            m_id = mention_options[selected_mention_label]
+                            c_id = contact_options[selected_author_label]
+                            
+                            supabase.table("mentions").update({"author_contact_id": c_id}).eq("id", m_id).execute()
+                            st.toast("Article successfully linked to contact!")
+                            st.rerun()
+
+        with col_manual:
+            st.markdown("#### ➕ Manually Add Missing Article")
+            if not all_contacts:
+                st.info("Rolodex contacts are required to assign authorship.")
+            else:
+                with st.form("manual_mention_form", clear_on_submit=True):
+                    m_title = st.text_input("Article Title*")
+                    m_url = st.text_input("Article URL Link*")
+                    m_outlet = st.text_input("Outlet / Platform Name*")
+                    m_date = st.date_input("Date Published")
+                    m_author_label = st.selectbox("Author / Contact", list(contact_options.keys()))
+                    m_snippet = st.text_area("Snippet / Key Quotes (Optional)")
                     
-                    supabase.table("mentions").update({"author_contact_id": c_id}).eq("id", m_id).execute()
-                    st.toast("Article successfully linked to contact!")
-                    st.rerun()
+                    if st.form_submit_button("Save & Link Manual Article", type="primary", use_container_width=True):
+                        if m_title.strip() and m_url.strip() and m_outlet.strip():
+                            c_id = contact_options[m_author_label]
+                            
+                            # Injects directly into the reviewed database, bypassing the triage queue
+                            supabase.table("mentions").insert({
+                                "title": m_title,
+                                "url": m_url,
+                                "outlet_platform": m_outlet,
+                                "date_published": m_date.isoformat(),
+                                "snippet": m_snippet,
+                                "author_contact_id": c_id,
+                                "status": "logged", 
+                                "recommendation": "monitor only",
+                                "sentiment_category": "Neutral",
+                                "sentiment_score": 0.0,
+                                "sentiment_rationale": "Manually logged by team member.",
+                                "ai_action_recommendation": "Manual entry — tracking for relationship management."
+                            }).execute()
+                            
+                            st.success("Manual article saved and linked successfully!")
+                            st.rerun()
+                        else:
+                            st.error("Title, URL, and Outlet are required fields.")
