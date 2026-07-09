@@ -227,8 +227,10 @@ if st.session_state["user_full_name"]:
                 st.caption(f"*{n['mention_title'][:40]}...*")
                 st.info(f"💬 {n['message']}")
                 
-                # Utilizes the Deep Link logic we built earlier!
-                st.markdown(f"[🔗 Open Direct Record Viewer](/?mention_id={n['mention_id']})")
+                # Use a button to safely update the URL without refreshing the page
+                if st.button("🔗 Open Direct Record Viewer", key=f"view_{n['id']}", use_container_width=True):
+                    st.query_params["mention_id"] = n['mention_id']
+                    st.rerun()
                 
                 if st.button("✅ Mark as Read", key=f"read_{n['id']}", use_container_width=True):
                     supabase.table("notifications").update({"is_read": True}).eq("id", n['id']).execute()
