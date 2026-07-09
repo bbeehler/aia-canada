@@ -218,38 +218,6 @@ MEDIA_CONTACTS = load_media_contacts()
 CONTACT_NAMES = ["Unassigned", "➕ Add New Contact..."] + [f"{c['full_name']} ({c['outlet']})" for c in MEDIA_CONTACTS]
 CONTACT_MAP = {f"{c['full_name']} ({c['outlet']})": c['id'] for c in MEDIA_CONTACTS}
 
-# ==========================================
-# --- 🔐 IN-APP GATEKEEPER ---
-# ==========================================
-if "user_full_name" not in st.session_state:
-    st.session_state["user_full_name"] = None
-
-# If they haven't told the app who they are yet, show the login screen and STOP loading.
-if not st.session_state["user_full_name"]:
-    st.title("🔐 AIA Canada Media Monitor")
-    st.write("Please select your profile to access the system.")
-    
-    # Remove "Unassigned" from the login dropdown options
-    login_options = [u for u in TEAM_USERS if u != "Unassigned"]
-    
-    with st.form("login_form"):
-        selected_user = st.selectbox("Select User Profile", ["-- Select Profile --"] + login_options)
-        
-        if st.form_submit_button("Enter System", type="primary"):
-            if selected_user != "-- Select Profile --":
-                st.session_state["user_full_name"] = selected_user
-                st.rerun()
-            else:
-                st.error("Please select a valid user profile.")
-    
-    # This command is critical! It completely stops the app here until they log in.
-    st.stop() 
-
-# --- 🟢 IF THEY PASS THE GATEKEEPER, SHOW LOGOUT BUTTON ---
-st.sidebar.markdown(f"👤 **Logged in as:** {st.session_state['user_full_name']}")
-if st.sidebar.button("Log Out"):
-    st.session_state["user_full_name"] = None
-    st.rerun()
 st.sidebar.markdown("---")
 
 app_mode = st.sidebar.radio(
