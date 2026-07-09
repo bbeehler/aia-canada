@@ -6,7 +6,7 @@ from google import genai
 from google.genai import types
 import dateparser
 import json
-import time  # <-- Imported for the rate limit throttle
+import time 
 
 # --- 1. SETUP & INITIALIZATION ---
 url = os.environ.get("SUPABASE_URL")
@@ -14,7 +14,6 @@ key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key)
 ai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-# Read timeframe parameter passed from GitHub workflow inputs
 chosen_timeframe = os.environ.get("TIMEFRAME_INPUT") or "qdr:w"
 print(f"⏰ Active Search Horizon Timeframe Window: {chosen_timeframe}")
 
@@ -40,7 +39,7 @@ def analyze_quality_and_flags(text: str):
 def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet: str, keyword_meta: dict):
     """
     Trained Bilingual Media Coordinator Node.
-    Evaluates corporate relevance against strict metadata context layers.
+    Saves your quota by marking noise instead of deleting it, allowing future blocks.
     """
     brand_knowledge_base = (
         "=== MANDATORY AIA CANADA CORPORATE KNOWLEDGE BASE ===\n"
@@ -101,8 +100,13 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         print(f"🤖 Gemini Evaluation -> Genuine: {is_genuine} | Rationale: {data.get('gatekeeper_rationale')}")
         
         if not is_genuine:
-            supabase.table("mentions").delete().eq("id", mention_id).execute()
-            print(f"❌ HARD DELETED noise entry from database: {title[:50]}...")
+            # --- QUOTA SAVER CHANGE: UPDATE STATUS TO 'NOISE' INSTEAD OF HARD DELETING ---
+            supabase.table("mentions").update({
+                "status": "noise",
+                "recommendation": "ignore",
+                "sentiment_rationale": f"Suppressed Noise: {data.get('gatekeeper_rationale')}"
+            }).eq("id", mention_id).execute()
+            print(f"🤫 Noise Suppressed (URL locked to shield future requests): {title[:50]}...")
             return False
             
         flags = analyze_quality_and_flags(title + " " + snippet)
@@ -129,13 +133,6 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         
     except Exception as e:
         print(f"⚠️ Error running processing analytics loop on record {mention_id}: {e}")
-        try:
-            supabase.table("mentions").update({
-                "sentiment_rationale": f"AI Processing Error: {str(e)}",
-                "ai_action_recommendation": "Review record manually — background processing node validation exception."
-            }).eq("id", mention_id).execute()
-        except Exception:
-            pass
         return True
 
 
@@ -180,6 +177,16 @@ if __name__ == "__main__":
                     
                     print(f"   👉 Processing Raw Candidate: \"{title[:50]}\"")
                     
+                    # --- THE TOTAL QUOTA SHIELD ---
+                    # Blocks repeat visits to processed articles AND repeat visits to known noise URLs
+                    try:
+                        dup_check = supabase.table("mentions").select("id, status").eq("url", url_link).execute()
+                        if dup_check.data:
+                            print(f"   ⏭️ TOTAL QUOTA SAVED: URL already matches history log index layer (Status: '{dup_check.data[0]['status']}'). Skipping Gemini API calls entirely.")
+                            continue
+                    except Exception as db_check_err:
+                        print(f"   ⚠️ Duplicate check failed: {db_check_err}")
+                    
                     raw_date_string = mention.get("date") 
                     if raw_date_string:
                         parsed_date = dateparser.parse(raw_date_string, settings={'RELATIVE_BASE': datetime.now()})
@@ -211,11 +218,8 @@ if __name__ == "__main__":
                             inserted_id = db_res.data[0]["id"]
                             kw_meta = {"term": kw["term"], "brand": kw["brand_tags"], "theme": kw["theme_layer"]}
                             
-                            # Execute Gemini evaluation pass
                             process_and_filter_mention_with_gemini(inserted_id, title, snippet, kw_meta)
                             
-                            # --- RATE LIMIT GUARDRAIL THROTTLE ---
-                            # Sleep for 4 seconds between requests to guarantee staying under the 15 RPM Free Tier ceiling
                             print("💤 Sleeping 4 seconds to comply with API rate limits...")
                             time.sleep(4)
                             
