@@ -219,8 +219,6 @@ MEDIA_CONTACTS = load_media_contacts()
 CONTACT_NAMES = ["Unassigned", "➕ Add New Contact..."] + [f"{c['full_name']} ({c['outlet']})" for c in MEDIA_CONTACTS]
 CONTACT_MAP = {f"{c['full_name']} ({c['outlet']})": c['id'] for c in MEDIA_CONTACTS}
 
-st.sidebar.markdown("---")
-
 app_mode = st.sidebar.radio(
     "Navigation Menu", 
     [
