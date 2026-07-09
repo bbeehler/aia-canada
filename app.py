@@ -140,6 +140,7 @@ if st.sidebar.button("🔒 Sign Out / Lock Session", use_container_width=True):
     supabase.auth.sign_out()
     st.session_state["auth_user"] = None
     st.session_state["user_role"] = "Viewer"
+    st.session_state["user_full_name"] = None
     st.rerun()
 
 st.sidebar.markdown("---")
@@ -235,7 +236,7 @@ app_mode = st.sidebar.radio(
 
 st.sidebar.markdown("---")
 # --- 🔔 IN-APP NOTIFICATION CENTER ---
-if st.session_state["user_full_name"]:
+if st.session_state.get("user_full_name"):
     notif_res = supabase.table("notifications").select("*").eq("recipient_name", st.session_state["user_full_name"]).eq("is_read", False).order("created_at", desc=True).execute()
     unread_count = len(notif_res.data) if notif_res.data else 0
     
@@ -328,17 +329,55 @@ if "mention_id" in st.query_params:
             edit_user = st.selectbox("Reassign Owner", TEAM_USERS, index=TEAM_USERS.index(current_user), key="dl_edit_user", disabled=IS_VIEWER)
             
         edit_note = st.text_input("Type new action note to append to history trail:", key="dl_edit_note_input", disabled=IS_VIEWER)
+
+        # --- CRM AUTHOR ATTRIBUTION IN DEEP LINK ---
+        st.markdown("#### ✍️ Author Attribution")
+        current_auth_label = "Unassigned"
+        if target_record.get('author_contact_id'):
+            match = next((c for c in MEDIA_CONTACTS if c['id'] == target_record['author_contact_id']), None)
+            if match:
+                current_auth_label = f"{match['full_name']} ({match['outlet']})"
         
+        author_sel = st.selectbox("Assign to Media Contact", CONTACT_NAMES, index=CONTACT_NAMES.index(current_auth_label) if current_auth_label in CONTACT_NAMES else 0, key=f"dl_auth_{target_record['id']}", disabled=IS_VIEWER)
+        
+        new_auth_name, new_auth_outlet = "", ""
+        if author_sel == "➕ Add New Contact...":
+            a1, a2 = st.columns(2)
+            with a1:
+                new_auth_name = st.text_input("New Contact Name*", key=f"dl_new_name_{target_record['id']}")
+            with a2:
+                new_auth_outlet = st.text_input("New Contact Outlet*", key=f"dl_new_out_{target_record['id']}")
+        
+        st.markdown("---")
         m1, m2 = st.columns([1, 4])
         with m1:
             if st.button("Save Changes", type="primary", use_container_width=True, key="dl_save_changes_btn", disabled=IS_VIEWER):
+                current_user_name = st.session_state["user_full_name"]
+                
+                # Process Inline Author Creation
+                final_contact_id = target_record.get('author_contact_id')
+                if author_sel == "Unassigned":
+                    final_contact_id = None
+                elif author_sel == "➕ Add New Contact...":
+                    if new_auth_name.strip() and new_auth_outlet.strip():
+                        new_c = supabase.table("media_contacts").insert({"full_name": new_auth_name.strip(), "outlet": new_auth_outlet.strip()}).execute()
+                        final_contact_id = new_c.data[0]['id']
+                else:
+                    final_contact_id = CONTACT_MAP[author_sel]
+
                 if edit_note.strip():
-                    add_action_note(target_record['id'], edit_note, edit_user)
+                    add_action_note(target_record['id'], edit_note, current_user_name)
+                    
+                # Fire Notification if re-assigned
+                if edit_user != "Unassigned":
+                    send_assignment_notification(target_record['id'], target_record['title'], edit_user, current_user_name, edit_note)
+
                 supabase.table("mentions").update({
                     "recommendation": edit_rec,
                     "alert_level": edit_lvl,
                     "status": edit_stat,
-                    "assigned_to_user": edit_user if edit_user != "Unassigned" else None
+                    "assigned_to_user": edit_user if edit_user != "Unassigned" else None,
+                    "author_contact_id": final_contact_id
                 }).eq("id", target_record['id']).execute()
                 st.rerun()
         with m2:
