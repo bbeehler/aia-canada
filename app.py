@@ -298,7 +298,7 @@ if "mention_id" in st.query_params:
         
         st.markdown("**📝 Text Snippet & Analytical Explanations**")
         st.write(f"**Raw Snippet:** *\"{target_record['snippet']}\"*")
-        st.write(f"**Gemini Rationale:** *{target_record['sentiment_rationale']}*")
+        st.write(f"**AI Rationale:** *{target_record['sentiment_rationale']}*")
         
         st.markdown("---")
         st.markdown("#### 📜 Actions Taken & Notes History Trail")
