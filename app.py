@@ -754,7 +754,7 @@ elif app_mode == "📝 AI Report Builder":
                 else:
                     try:
                         response = ai_client.models.generate_content(
-                            model="gemini-3.5-flash",
+                            model="gemini-2.5-flash",
                             contents=[f"Daily Processed Logs:\n{str(raw_data.data)}"],
                             config=types.GenerateContentConfig(system_instruction=daily_instruction)
                         )
@@ -788,7 +788,7 @@ elif app_mode == "📝 AI Report Builder":
                 else:
                     try:
                         response = ai_client.models.generate_content(
-                            model="gemini-3.5-flash",
+                            model="gemini-2.5-flash",
                             contents=[f"Historical Logs:\n{str(raw_data.data)}"],
                             config=types.GenerateContentConfig(system_instruction=weekly_instruction)
                         )
@@ -820,7 +820,7 @@ elif app_mode == "💬 Ask AIA Media":
                 
                 # 3. Pass the clean string to Gemini
                 response = ai_client.models.generate_content(
-                    model="gemini-3.5-flash",
+                    model="gemini-2.5-flash",
                     contents=f"Context:\n{clean_context}\n\nQuery: {user_query}",
                     config=types.GenerateContentConfig(system_instruction=qa_instruction)
                 )
