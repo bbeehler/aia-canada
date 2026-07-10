@@ -610,8 +610,8 @@ elif app_mode == "📋 Reviewed Database Table":
                 # INJECTED HTML ANCHOR TARGET FOR REPORT LINKS
                 st.markdown(f'<div id="{target_record["id"]}"></div>', unsafe_allow_html=True)
                 
-                st.markdown(f"### 📄 Full Metadata Profile: `{target_record['title']}`")
-                st.info(f"🤖 **Gemini Strategic Action Recommendation for this Mention:** {target_record.get('ai_action_recommendation', 'N/A')}")
+                st.markdown(f"### 📄 Metadata Profile: `{target_record['title']}`")
+                st.info(f"🤖 **AI Strategic Action Recommendation for this Mention:** {target_record.get('ai_action_recommendation', 'N/A')}")
                 
                 meta_col1, meta_col2, meta_col3 = st.columns(3)
                 with meta_col1:
