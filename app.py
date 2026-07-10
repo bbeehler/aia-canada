@@ -1105,9 +1105,17 @@ elif app_mode == "📞 Media CRM & Inquiries":
                 st.info("No active media inquiries at this time.")
             else:
                 for inq in inq_res.data:
-                    contact_info = inq.get("media_contacts", {})
-                    contact_name = contact_info.get("full_name", "Unknown")
-                    outlet = contact_info.get("outlet", "Unknown")
+                    raw_contact = inq.get("media_contacts")
+                
+                    if isinstance(raw_contact, list) and raw_contact:
+                        contact_info = raw_contact[0]
+                    elif isinstance(raw_contact, dict):
+                        contact_info = raw_contact
+                    else:
+                        contact_info = {}
+                
+                    contact_name = contact_info.get("full_name") or "Unknown"
+                    outlet = contact_info.get("outlet") or "Unknown"
                     
                     with st.expander(f"⏳ {inq['deadline'][:10]} | {contact_name} ({outlet}) - {inq['inquiry_subject']}"):
                         
