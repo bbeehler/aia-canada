@@ -816,7 +816,7 @@ elif app_mode == "📝 Report Builder":
         if st.button("Generate Weekly Trend Document", use_container_width=True):
             with st.spinner("Compiling historical database records for processing with Gemini..."):
                 # Fetches the latest 100 items (Includes pending so recent items can be compiled)
-                raw_data = supabase.table("mentions").select("id, title, url, outlet_platform, theme, status, recommendation, brands_affected, alert_level").order("inserted_at", desc=True).limit(100).execute()
+                raw_data = (supabase.table("mentions").select("id, title, url, outlet_platform, theme, status, recommendation, ""brands_affected, alert_level, assigned_to_user, date_published, ""sentiment_category, sentiment_score, naming_error_flag, ""data_conflict_flag, data_conflict_details").order("inserted_at", desc=True).limit(100).execute())
                 
                 if not raw_data.data:
                     st.warning("No validated tracking records discovered.")
