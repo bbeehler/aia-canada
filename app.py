@@ -1528,7 +1528,6 @@ elif app_mode == "📞 Media CRM & Inquiries":
                             st.error("Title, URL, and Outlet are required fields.")
     # --- TAB 2: MEDIA ROLODEX ---
     # app.py
-with crm_tab_contacts:
     c1, c2 = st.columns([1, 2])
 
     with c1:
