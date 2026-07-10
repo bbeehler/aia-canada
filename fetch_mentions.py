@@ -7,6 +7,7 @@ from google.genai import types
 import dateparser
 import json
 import time 
+import re
 
 # --- 1. SETUP & INITIALIZATION ---
 url = os.environ.get("SUPABASE_URL")
@@ -71,16 +72,9 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
         "TRIAGE DIRECTION:\n"
         "- If the text mentions the target keyword but contextually refers to architecture, aviation, finance funds, or anything outside the Canadian auto care/aftermarket industry, set is_genuine_match to false.\n"
         "- If it is a short, vague snippet containing our keyword and cannot be explicitly verified as noise, give it the benefit of the doubt and set is_genuine_match to true for human review.\n\n"
-        "Return a clean JSON payload matching this schema exactly:\n"
-        "{\n"
-        "  \"is_genuine_match\": true | false,\n"
-        "  \"gatekeeper_rationale\": \"A short explanation of why this was approved as genuine or rejected as noise.\",\n"
-        "  \"category\": \"Positive\" | \"Neutral\" | \"Negative\" | \"Mixed\",\n"
-        "  \"score\": float between -1.0 and 1.0,\n"
-        "  \"rationale\": \"Explanation of sentiment analysis score choice.\",\n"
-        "  \"ai_action_recommendation\": \"A strategic tactical recommendation text sentence.\"\n"
-        "}\n"
-        "Output raw JSON fields only. Do not format inside markdown blocks or fences."
+        "CRITICAL JSON FORMATTING RULES:\n"
+        "1. You MUST properly escape any internal quotation marks using a backslash (\\\") or use single quotes for internal quotes to prevent JSON parsing errors.\n"
+        "2. Output raw JSON fields only. Do not format inside markdown blocks or fences."
     )
     
     try:
@@ -89,11 +83,24 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
             contents=[f"Headline: {title}\nExcerpt Snippet: {snippet}"],
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
-                response_mime_type="application/json"
+                response_mime_type="application/json",
+                response_schema={
+                    "type": "OBJECT",
+                    "properties": {
+                        "is_genuine_match": {"type": "BOOLEAN"},
+                        "gatekeeper_rationale": {"type": "STRING"},
+                        "category": {"type": "STRING"},
+                        "score": {"type": "NUMBER"},
+                        "rationale": {"type": "STRING"},
+                        "ai_action_recommendation": {"type": "STRING"}
+                    },
+                    "required": ["is_genuine_match", "gatekeeper_rationale", "category", "score", "rationale", "ai_action_recommendation"]
+                }
             )
         )
         
-        clean_text = response.text.strip().lstrip("```json").rstrip("```").strip()
+        raw_text = response.text.strip()
+        clean_text = re.sub(r'^```(?:json)?\n?|\n?```$', '', raw_text, flags=re.MULTILINE).strip()
         data = json.loads(clean_text)
         
         is_genuine = data.get("is_genuine_match", True)
