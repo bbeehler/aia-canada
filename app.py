@@ -1184,101 +1184,245 @@ elif app_mode == "📞 Media CRM & Inquiries":
                                 st.rerun()
 
     # --- TAB 2: MEDIA ROLODEX ---
-    with crm_tab_contacts:
-        c1, c2 = st.columns([1, 2])
-        
-        with c1:
-            st.markdown("### 📇 Add New Contact")
-            with st.form("new_contact_form", clear_on_submit=True):
-                c_name = st.text_input("Full Name*")
-                c_outlet = st.text_input("Primary Outlet / Publication*")
-                c_email = st.text_input("Email Address")
-                c_phone = st.text_input("Phone Number")
-                c_notes = st.text_area("Background Notes (Bias, past interactions, beats)")
-                
-                if st.form_submit_button("Save Contact", type="primary"):
-                    if c_name.strip() and c_outlet.strip():
+    # app.py
+with crm_tab_contacts:
+    c1, c2 = st.columns([1, 2])
+
+    with c1:
+        st.markdown("### 📇 Add New Contact")
+        with st.form("new_contact_form", clear_on_submit=True):
+            c_name = st.text_input("Full Name*")
+            c_outlet = st.text_input("Primary Outlet / Publication*")
+            c_email = st.text_input("Email Address")
+            c_phone = st.text_input("Phone Number")
+            c_notes = st.text_area("Background Notes (Bias, past interactions, beats)")
+
+            if st.form_submit_button("Save Contact", type="primary"):
+                if c_name.strip() and c_outlet.strip():
+                    try:
                         supabase.table("media_contacts").insert({
-                            "full_name": c_name, "outlet": c_outlet, "email": c_email, 
-                            "phone": c_phone, "background_notes": c_notes
+                            "full_name": c_name.strip(),
+                            "outlet": c_outlet.strip(),
+                            "email": c_email.strip() or None,
+                            "phone": c_phone.strip() or None,
+                            "background_notes": c_notes.strip() or None
                         }).execute()
-                        st.success(f"{c_name} added to Rolodex!")
+                        st.success(f"{c_name.strip()} added to Rolodex!")
                         st.rerun()
-                    else:
-                        st.error("Name and Outlet are required.")
-                        
-        with c2:
-            st.markdown("### 📂 Contact Profiles & History")
-            if all_contacts:
-                selected_profile_label = st.selectbox("Search / Select a Contact Profile", list(contact_options.keys()))
-                profile_id = contact_options[selected_profile_label]
-                
-                # Retrieve the selected contact's details
-                profile_data = next((c for c in all_contacts if c['id'] == profile_id), None)
-                
+                    except Exception as e:
+                        st.error(f"Failed to save contact: {e}")
+                else:
+                    st.error("Name and Outlet are required.")
+
+    with c2:
+        st.markdown("### 📂 Contact Profiles & History")
+
+        if all_contacts:
+            selected_profile_label = st.selectbox(
+                "Search / Select a Contact Profile",
+                list(contact_options.keys())
+            )
+            profile_id = contact_options[selected_profile_label]
+            profile_data = next((c for c in all_contacts if c["id"] == profile_id), None)
+
+            if profile_data:
                 st.markdown(f"#### 👤 {profile_data['full_name']} ({profile_data['outlet']})")
-                st.write(f"📧 **Email:** {profile_data['email'] or 'N/A'} | 📞 **Phone:** {profile_data['phone'] or 'N/A'}")
-                st.caption(f"**Internal Notes:** {profile_data['background_notes'] or 'None provided.'}")
-                
+                st.write(
+                    f"📧 **Email:** {profile_data.get('email') or 'N/A'} | "
+                    f"📞 **Phone:** {profile_data.get('phone') or 'N/A'}"
+                )
+                st.caption(f"**Internal Notes:** {profile_data.get('background_notes') or 'None provided.'}")
+
+                st.markdown("---")
+                st.markdown("### ✏️ Edit Contact")
+
+                with st.form(f"edit_contact_form_{profile_id}"):
+                    edit_name = st.text_input("Full Name*", value=profile_data.get("full_name", ""))
+                    edit_outlet = st.text_input("Primary Outlet / Publication*", value=profile_data.get("outlet", ""))
+                    edit_email = st.text_input("Email Address", value=profile_data.get("email") or "")
+                    edit_phone = st.text_input("Phone Number", value=profile_data.get("phone") or "")
+                    edit_notes = st.text_area(
+                        "Background Notes (Bias, past interactions, beats)",
+                        value=profile_data.get("background_notes") or ""
+                    )
+
+                    save_contact = st.form_submit_button("Save Contact Changes", type="primary")
+
+                    if save_contact:
+                        if edit_name.strip() and edit_outlet.strip():
+                            try:
+                                supabase.table("media_contacts").update({
+                                    "full_name": edit_name.strip(),
+                                    "outlet": edit_outlet.strip(),
+                                    "email": edit_email.strip() or None,
+                                    "phone": edit_phone.strip() or None,
+                                    "background_notes": edit_notes.strip() or None
+                                }).eq("id", profile_id).execute()
+
+                                st.success("Contact updated successfully!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed to update contact: {e}")
+                        else:
+                            st.error("Name and Outlet are required.")
+
+                st.markdown("---")
+                st.markdown("### 🗑️ Remove Contact")
+
+                mentions_count = 0
+                inquiries_count = 0
+
+                try:
+                    mentions_res = supabase.table("mentions").select("id", count="exact").eq("author_contact_id", profile_id).execute()
+                    mentions_count = mentions_res.count or 0
+                except Exception:
+                    pass
+
+                try:
+                    inquiries_res = supabase.table("media_inquiries").select("id", count="exact").eq("contact_id", profile_id).execute()
+                    inquiries_count = inquiries_res.count or 0
+                except Exception:
+                    pass
+
+                st.caption(
+                    f"This contact is linked to **{mentions_count} mention(s)** and "
+                    f"**{inquiries_count} inquiry/inquiries**."
+                )
+
+                delete_mode = st.radio(
+                    "Delete mode",
+                    [
+                        "Block delete if linked records exist",
+                        "Force delete and unlink related records"
+                    ],
+                    key=f"delete_mode_{profile_id}"
+                )
+
+                confirm_delete = st.checkbox(
+                    "I understand this action cannot be undone.",
+                    key=f"confirm_delete_{profile_id}"
+                )
+
+                if st.button(
+                    "Delete Contact",
+                    key=f"delete_contact_btn_{profile_id}",
+                    type="secondary",
+                    use_container_width=True
+                ):
+                    if not confirm_delete:
+                        st.error("Please confirm deletion first.")
+                    else:
+                        try:
+                            if delete_mode == "Block delete if linked records exist":
+                                if mentions_count > 0 or inquiries_count > 0:
+                                    st.error(
+                                        "This contact cannot be deleted because it is still linked to mentions or inquiries. "
+                                        "Use force delete to unlink those records first."
+                                    )
+                                else:
+                                    supabase.table("media_contacts").delete().eq("id", profile_id).execute()
+                                    st.success("Contact deleted successfully!")
+                                    st.rerun()
+
+                            else:
+                                # Why: prevent orphaned references before deleting contact.
+                                if mentions_count > 0:
+                                    supabase.table("mentions").update({
+                                        "author_contact_id": None
+                                    }).eq("author_contact_id", profile_id).execute()
+
+                                if inquiries_count > 0:
+                                    supabase.table("media_inquiries").update({
+                                        "contact_id": None
+                                    }).eq("contact_id", profile_id).execute()
+
+                                supabase.table("media_contacts").delete().eq("id", profile_id).execute()
+                                st.success("Contact deleted and related records unlinked successfully!")
+                                st.rerun()
+
+                        except Exception as e:
+                            st.error(f"Failed to delete contact: {e}")
+
                 st.markdown("---")
                 st.markdown("#### 📨 Inquiry History")
-                
-                # Fetch their entire history of inquiries
-                inq_hist = supabase.table("media_inquiries").select("*").eq("contact_id", profile_id).order("deadline", desc=True).execute()
-                
+
+                inq_hist = supabase.table("media_inquiries") \
+                    .select("*") \
+                    .eq("contact_id", profile_id) \
+                    .order("deadline", desc=True) \
+                    .execute()
+
                 if not inq_hist.data:
                     st.info("No inquiries logged for this contact.")
                 else:
                     for inq in inq_hist.data:
-                        # Color code the status symbol
-                        stat_icon = "🟢" if inq['status'] == "resolved" else "🟡" if inq['status'] == "in-progress" else "🔴"
-                        
+                        stat_icon = (
+                            "🟢" if inq["status"] == "resolved"
+                            else "🟡" if inq["status"] == "in-progress"
+                            else "🔴"
+                        )
+
                         with st.expander(f"{stat_icon} [{inq['status'].upper()}] {inq['deadline'][:10]} - {inq['inquiry_subject']}"):
-                            st.write(f"**Details:** {inq['inquiry_details']}")
-                            
-                            # Form to update status and re-assign
+                            st.write(f"**Details:** {inq.get('inquiry_details') or 'No details provided.'}")
+
                             i_col1, i_col2, i_col3 = st.columns(3)
                             with i_col1:
-                                edit_inq_stat = st.selectbox("Update Status", ["pending", "in-progress", "resolved"], index=["pending", "in-progress", "resolved"].index(inq['status']), key=f"p_stat_{inq['id']}")
+                                edit_inq_stat = st.selectbox(
+                                    "Update Status",
+                                    ["pending", "in-progress", "resolved"],
+                                    index=["pending", "in-progress", "resolved"].index(inq["status"]),
+                                    key=f"p_stat_{inq['id']}"
+                                )
                             with i_col2:
-                                current_inq_owner = inq['assigned_to_user'] if inq['assigned_to_user'] in TEAM_USERS else "Unassigned"
-                                edit_inq_owner = st.selectbox("Assignee", TEAM_USERS, index=TEAM_USERS.index(current_inq_owner), key=f"p_owner_{inq['id']}")
+                                current_inq_owner = inq["assigned_to_user"] if inq["assigned_to_user"] in TEAM_USERS else "Unassigned"
+                                edit_inq_owner = st.selectbox(
+                                    "Assignee",
+                                    TEAM_USERS,
+                                    index=TEAM_USERS.index(current_inq_owner),
+                                    key=f"p_owner_{inq['id']}"
+                                )
                             with i_col3:
                                 inq_note = st.text_input("Ping Note to Assignee (Optional)", key=f"p_note_{inq['id']}")
-                                
+
                             if st.button("Save & Notify Team", key=f"p_btn_{inq['id']}", use_container_width=True):
                                 current_user_name = st.session_state["user_full_name"]
-                                
+
                                 supabase.table("media_inquiries").update({
                                     "status": edit_inq_stat,
                                     "assigned_to_user": edit_inq_owner if edit_inq_owner != "Unassigned" else None
-                                }).eq("id", inq['id']).execute()
-                                
-                                # Send notification if assigned to someone
+                                }).eq("id", inq["id"]).execute()
+
                                 if edit_inq_owner != "Unassigned":
                                     ping_msg = inq_note if inq_note.strip() else f"Inquiry status updated to {edit_inq_stat}."
                                     send_assignment_notification(
-                                        None, 
-                                        f"MEDIA INQUIRY: {inq['inquiry_subject']}", 
-                                        edit_inq_owner, 
-                                        current_user_name, 
+                                        None,
+                                        f"MEDIA INQUIRY: {inq['inquiry_subject']}",
+                                        edit_inq_owner,
+                                        current_user_name,
                                         ping_msg
                                     )
+
                                 st.toast("Inquiry updated successfully!")
                                 st.rerun()
-                                
+
                 st.markdown("#### 📰 Published Articles Linked")
-                # Fetch all published articles attributed to this author
-                mentions_hist = supabase.table("mentions").select("title, outlet_platform, date_published, url").eq("author_contact_id", profile_id).order("date_published", desc=True).execute()
-                
+
+                mentions_hist = supabase.table("mentions") \
+                    .select("title, outlet_platform, date_published, url") \
+                    .eq("author_contact_id", profile_id) \
+                    .order("date_published", desc=True) \
+                    .execute()
+
                 if not mentions_hist.data:
                     st.caption("No articles have been linked to this author yet.")
                 else:
                     for mh in mentions_hist.data:
-                        st.markdown(f"- **{mh['date_published']}** | [{mh['title']}]({mh['url']}) - *{mh['outlet_platform']}*")
-                        
-            else:
-                st.info("Rolodex is currently empty. Add a contact on the left to begin building profiles.")
+                        st.markdown(
+                            f"- **{mh['date_published']}** | "
+                            f"[{mh['title']}]({mh['url']}) - *{mh['outlet_platform']}*"
+                        )
+        else:
+            st.info("Rolodex is currently empty. Add a contact on the left to begin building profiles.")
 
     # --- TAB 3: LINKING ARTICLES TO CONTACTS ---
     with crm_tab_link:
