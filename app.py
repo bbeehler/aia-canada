@@ -755,7 +755,7 @@ elif app_mode == "🚨 Daily Crisis Center":
         st.text_area("Markdown Summary Text Content", markdown_body, height=300)
 
 # --- MODULE 4: AI REPORT BUILDER ---
-elif app_mode == "📝 AI Report Builder":
+elif app_mode == "📝 Report Builder":
     st.subheader("📝 Automated Executive Reporting")
     st.write("Generate AI-driven summaries based on the raw tracking data in your database.")
     
