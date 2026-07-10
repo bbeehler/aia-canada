@@ -524,42 +524,77 @@ if app_mode == "📥 Inbox / Triage":
 elif app_mode == "📋 Reviewed Database Table":
     st.subheader("📋 Reviewed Mentions Archive")
     st.write("Use search filters to populate records by actual publication date. Click on any row to view details.")
-    
-    f1, f2, f3 = st.columns([2, 2, 3])
+
+    f1, f2, f3, f4 = st.columns([2, 2, 3, 2])
+
     with f1:
-        start_date = st.date_input("Start Date (Published)", datetime.now().date() - timedelta(days=7))
+        start_date = st.date_input(
+            "Start Date (Published)",
+            datetime.now().date() - timedelta(days=7),
+            key="reviewed_start_date",
+        )
+
     with f2:
-        end_date = st.date_input("End Date (Published)", datetime.now().date())
+        end_date = st.date_input(
+            "End Date (Published)",
+            datetime.now().date(),
+            key="reviewed_end_date",
+        )
+
     with f3:
-        search_kw = st.text_input("Search Title or Snippet Keyword", placeholder="Type a term...")
-    
-    # Query constrained directly to the parsed publication date index layer
-    response = supabase.table("mentions")\
-        .select("*")\
-        .in_("status", ["logged", "escalated", "resolved"])\
-        .gte("date_published", start_date.isoformat())\
-        .lte("date_published", end_date.isoformat())\
-        .order("date_published", desc=True).execute()
+        search_kw = st.text_input(
+            "Search Title or Snippet Keyword",
+            placeholder="Type a term...",
+            key="reviewed_search_kw",
+        )
+
+    with f4:
+        reviewed_owner_options = ["All", "Unassigned"] + [user for user in TEAM_USERS if user != "Unassigned"]
+        selected_assigned_user = st.selectbox(
+            "Assigned To",
+            reviewed_owner_options,
+            key="reviewed_assigned_user_filter",
+        )
+
+    query = (
+        supabase.table("mentions")
+        .select("*")
+        .in_("status", ["logged", "escalated", "resolved"])
+        .gte("date_published", start_date.isoformat())
+        .lte("date_published", end_date.isoformat())
+    )
+
+    if selected_assigned_user == "Unassigned":
+        query = query.is_("assigned_to_user", "null")
+    elif selected_assigned_user != "All":
+        query = query.eq("assigned_to_user", selected_assigned_user)
+
+    response = query.order("date_published", desc=True).execute()
     reviewed_data = response.data
-    
+
     if not reviewed_data:
         st.info("No reviewed tracking logs match the specified publication parameters.")
     else:
         df = pd.DataFrame(reviewed_data)
+
         if search_kw:
-            df = df[df['title'].str.contains(search_kw, case=False, na=False) | df['snippet'].str.contains(search_kw, case=False, na=False)]
-            
+            df = df[
+                df["title"].str.contains(search_kw, case=False, na=False)
+                | df["snippet"].str.contains(search_kw, case=False, na=False)
+            ]
+
         if df.empty:
             st.warning("No records found matching that keyword combination.")
         else:
             display_columns = [
-                "date_published", "outlet_platform", "title", "theme", 
-                "sentiment_category", "sentiment_score", "alert_level", "status", "assigned_to_user", "escalated_to_user", "recommendation"
+                "date_published", "outlet_platform", "title", "theme",
+                "sentiment_category", "sentiment_score", "alert_level",
+                "status", "assigned_to_user", "escalated_to_user", "recommendation"
             ]
-            
+
             selection = st.dataframe(
-                df[display_columns], 
-                use_container_width=True, 
+                df[display_columns],
+                use_container_width=True,
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="single-row"
