@@ -616,28 +616,27 @@ elif app_mode == "📋 Reviewed Database Table":
                 meta_col1, meta_col2, meta_col3 = st.columns(3)
                 with meta_col1:
                     st.markdown("**📌 Core Tracking Identifiers**")
-                    st.write(f"- **Database ID (UUID):** `{target_record['id']}`")
-                    st.write(f"- **System Insertion Timestamp:** `{target_record['inserted_at']}`")
+                    st.write(f"- **Discovered Date:** `{target_record['inserted_at']}`")
                     st.write(f"- **Official Publication Date:** `{target_record['date_published']}`")
                     st.write(f"- **Direct Source URL:** [Open Live Web Link]({target_record['url']})")
                 
                 with meta_col2:
                     st.markdown("**🏷️ Corporate Context & Scope Tags**")
                     st.write(f"- **Brands Explicitly Affected:** {', '.join(target_record['brands_affected']) if target_record['brands_affected'] else 'None mapped'}")
-                    st.write(f"- **Structural Theme Classification:** `{target_record['theme']}`")
-                    st.write(f"- **Workflow Pipeline State:** `{target_record['status']}`")
+                    st.write(f"- **Theme Classification:** `{target_record['theme']}`")
+                    st.write(f"- **Workflow State:** `{target_record['status']}`")
                     st.write(f"- **Assigned Active Owner:** `{target_record['assigned_to_user'] or 'Unassigned'}`")
                     st.write(f"- **Escalation Target Recipient:** `{target_record['escalated_to_user'] or 'None assigned'}`")
                 
                 with meta_col3:
-                    st.markdown("**🧠 Gemini Sentiment Metrics & Quality Flags**")
+                    st.markdown("**🧠 Sentiment Metrics & Quality Flags**")
                     st.write(f"- **Inferred Tone Category:** `{target_record['sentiment_category']}`")
                     st.write(f"- **Sentiment Intensity Score (-1.0 to 1.0):** `{target_record['sentiment_score']}`")
                     st.write(f"- **Action Recommendation Strategy:** `{target_record['recommendation']}`")
                 
                 st.markdown("**📝 Text Snippet & Analytical Explanations**")
                 st.write(f"**Raw Text Excerpt Snippet:** *\"{target_record['snippet']}\"*")
-                st.write(f"**Gemini Sentiment Rationale:** *{target_record['sentiment_rationale']}*")
+                st.write(f"**AI Sentiment Rationale:** *{target_record['sentiment_rationale']}*")
                 
                 st.markdown("---")
                 st.markdown("#### 📜 Actions Taken & Notes History Trail")
