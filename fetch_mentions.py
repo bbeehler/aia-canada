@@ -79,7 +79,7 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
     
     try:
         response = ai_client.models.generate_content(
-            model="gemini-3.5-flash",
+            model="gemini-2.5-flash",
             contents=[f"Headline: {title}\nExcerpt Snippet: {snippet}"],
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
