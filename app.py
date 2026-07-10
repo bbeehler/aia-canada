@@ -1532,7 +1532,7 @@ elif app_mode == "📞 Media CRM & Inquiries":
 
     with c1:
         st.markdown("### 📇 Add New Contact")
-        with st.form("new_contact_form", clear_on_submit=True):
+        with st.form("new_contact_form_v2", clear_on_submit=True):
             c_name = st.text_input("Full Name*")
             c_outlet = st.text_input("Primary Outlet / Publication*")
             c_email = st.text_input("Email Address")
