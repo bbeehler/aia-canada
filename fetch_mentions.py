@@ -89,7 +89,10 @@ def process_and_filter_mention_with_gemini(mention_id: str, title: str, snippet:
                     "properties": {
                         "is_genuine_match": {"type": "BOOLEAN"},
                         "gatekeeper_rationale": {"type": "STRING"},
-                        "category": {"type": "STRING"},
+                        "category": {
+                            "type": "STRING",
+                            "enum": ["Positive", "Neutral", "Negative", "Mixed"]
+                        },
                         "score": {"type": "NUMBER"},
                         "rationale": {"type": "STRING"},
                         "ai_action_recommendation": {"type": "STRING"}
