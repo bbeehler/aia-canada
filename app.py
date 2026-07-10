@@ -763,7 +763,7 @@ elif app_mode == "📝 Report Builder":
     
     # --- DAILY REPORT TAB ---
     with tab_daily:
-        st.markdown("### Generate Daily Operations Report")
+        st.markdown("### Generate Daily Media Report")
         st.write("Compiles a summary of all items that were successfully processed and cleared from the inbox for a specific date.")
         
         target_date = st.date_input("Select Processing Date", datetime.now().date(), key="daily_date_picker")
@@ -782,7 +782,7 @@ elif app_mode == "📝 Report Builder":
                 end_iso = datetime.combine(target_date, datetime.max.time()).isoformat()
                 
                 # Fetch records that entered the system on this date (Includes pending so recent items can be compiled)
-                raw_data = supabase.table("mentions").select("id, title, url, outlet_platform, theme, status, recommendation, brands_affected, alert_level").gte("inserted_at", start_iso).lte("inserted_at", end_iso).execute()
+                raw_data = supabase.table("mentions").select("id, title, url, outlet_platform, theme, status, recommendation, brands_affected, alert_level, assigned_to_user, date_published, sentiment_score").gte("inserted_at", start_iso).lte("inserted_at", end_iso).execute()
                 
                 if not raw_data.data:
                     st.warning("No media tracking records were processed or logged on this specific date.")
@@ -1064,7 +1064,7 @@ elif app_mode == "⚙️ System Settings Dashboard":
             if IS_ADMIN:
                 with st.form("edit_tmpl_form"):
                     st.write(f"Editing Prompt Architecture for: **{selected_tmpl_name}**")
-                    updated_prompt_text = st.text_area("Gemini System Instruction Matrix Guidance Prompt", value=current_tmpl["system_instruction_prompt"], height=300)
+                    updated_prompt_text = st.text_area("System Instruction Matrix Guidance Prompt", value=current_tmpl["system_instruction_prompt"], height=300)
                     if st.form_submit_button("Overwrite System Prompt Template Details"):
                         supabase.table("monitor_templates").update({
                             "system_instruction_prompt": updated_prompt_text
