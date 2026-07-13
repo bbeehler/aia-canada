@@ -142,6 +142,40 @@ def get_app_record_url(mention_id):
     return f"/?mention_id={mention_id}"
 
 
+@st.cache_data(ttl=300)
+def load_registered_email_recipients():
+    """Load registered application users with valid tracking email addresses."""
+    try:
+        response = (
+            supabase.table("monitor_users")
+            .select("full_name, tracking_email, user_role")
+            .not_.is_("tracking_email", "null")
+            .order("full_name")
+            .execute()
+        )
+    except Exception as exc:
+        st.warning(f"Could not load registered email recipients: {exc}")
+        return []
+
+    recipients = []
+    seen_emails = set()
+
+    for row in response.data or []:
+        email = str(row.get("tracking_email") or "").strip()
+        if not email or email.lower() in seen_emails:
+            continue
+
+        seen_emails.add(email.lower())
+        full_name = row.get("full_name") or email
+        role = row.get("user_role") or "User"
+        recipients.append({
+            "label": f"{full_name} ({role})",
+            "email": email,
+        })
+
+    return recipients
+
+
 def build_mention_email_body(mention, additional_message=""):
     """Build the plain-text body used by the email share link."""
     brands = mention.get("brands_affected") or []
@@ -177,13 +211,24 @@ Open app workspace:
 """
 
 
-def build_mailto_url(mention, recipient="", additional_message=""):
+def build_mailto_url(mention, recipients, additional_message=""):
     """Build a mailto URL for Outlook or the user's default email client."""
     subject = f"AIA Canada Media Mention: {mention.get('title') or 'Untitled'}"
     body = build_mention_email_body(mention, additional_message)
 
+    clean_recipients = []
+    seen_emails = set()
+    for email in recipients:
+        normalized_email = str(email or "").strip()
+        if not normalized_email or normalized_email.lower() in seen_emails:
+            continue
+        seen_emails.add(normalized_email.lower())
+        clean_recipients.append(normalized_email)
+
+    recipient_string = ",".join(clean_recipients)
+
     return (
-        f"mailto:{quote(recipient.strip(), safe='@,;')}"
+        f"mailto:{quote(recipient_string, safe='@,')}"
         f"?subject={quote(subject)}"
         f"&body={quote(body)}"
     )
@@ -220,8 +265,50 @@ def mark_mention_for_daily_report(mention_id, report_date, shared_by):
 
 
 def render_share_mention_controls(mention, key_prefix):
-    """Render email-sharing and daily-report inclusion controls."""
+    """Render registered-user email and daily-report inclusion controls."""
     st.markdown("#### 📧 Share Mention")
+
+    registered_recipients = load_registered_email_recipients()
+    recipient_map = {
+        recipient["label"]: recipient["email"]
+        for recipient in registered_recipients
+    }
+
+    assigned_owner = mention.get("assigned_to_user")
+    default_recipient_labels = [
+        label
+        for label in recipient_map
+        if assigned_owner
+        and label.startswith(f"{assigned_owner} (")
+    ]
+
+    selected_recipient_labels = st.multiselect(
+        "Select registered recipients",
+        options=list(recipient_map.keys()),
+        default=default_recipient_labels,
+        placeholder="Select one or more registered users",
+        key=f"{key_prefix}_registered_recipients",
+    )
+
+    selected_recipient_emails = [
+        recipient_map[label]
+        for label in selected_recipient_labels
+    ]
+
+    additional_recipient_text = st.text_input(
+        "Additional email addresses",
+        placeholder="external@example.com, another@example.com",
+        key=f"{key_prefix}_additional_recipients",
+        help="Optional. Separate multiple addresses with commas or semicolons.",
+    )
+    additional_recipient_emails = [
+        email.strip()
+        for email in additional_recipient_text.replace(";", ",").split(",")
+        if email.strip()
+    ]
+    all_recipient_emails = (
+        selected_recipient_emails + additional_recipient_emails
+    )
 
     existing_report_date = mention.get("daily_report_date")
     default_report_date = datetime.now().date()
@@ -233,11 +320,6 @@ def render_share_mention_controls(mention, key_prefix):
         except ValueError:
             pass
 
-    recipient = st.text_input(
-        "Recipient email address",
-        placeholder="name@example.com",
-        key=f"{key_prefix}_recipient",
-    )
     report_date = st.date_input(
         "Include in daily media report for",
         value=default_report_date,
@@ -249,6 +331,12 @@ def render_share_mention_controls(mention, key_prefix):
         height=90,
         key=f"{key_prefix}_message",
     )
+
+    if selected_recipient_emails:
+        st.caption(
+            "Selected recipients: "
+            + ", ".join(selected_recipient_emails)
+        )
 
     if mention.get("include_in_daily_report"):
         st.info(
@@ -263,23 +351,29 @@ def render_share_mention_controls(mention, key_prefix):
         key=f"{key_prefix}_prepare",
         disabled=IS_VIEWER,
     ):
-        try:
-            current_user = st.session_state.get("user_full_name") or "Unknown user"
-            mark_mention_for_daily_report(
-                mention_id=mention["id"],
-                report_date=report_date,
-                shared_by=current_user,
-            )
-            st.session_state[f"{key_prefix}_mailto"] = build_mailto_url(
-                mention=mention,
-                recipient=recipient,
-                additional_message=additional_message,
-            )
-            st.success(
-                f"Mention added to the {report_date.isoformat()} daily report."
-            )
-        except Exception as exc:
-            st.error(f"Unable to prepare the mention for sharing: {exc}")
+        if not all_recipient_emails:
+            st.error("Select at least one registered recipient or enter an additional email address.")
+        else:
+            try:
+                current_user = (
+                    st.session_state.get("user_full_name")
+                    or "Unknown user"
+                )
+                mark_mention_for_daily_report(
+                    mention_id=mention["id"],
+                    report_date=report_date,
+                    shared_by=current_user,
+                )
+                st.session_state[f"{key_prefix}_mailto"] = build_mailto_url(
+                    mention=mention,
+                    recipients=all_recipient_emails,
+                    additional_message=additional_message,
+                )
+                st.success(
+                    f"Mention added to the {report_date.isoformat()} daily report."
+                )
+            except Exception as exc:
+                st.error(f"Unable to prepare the mention for sharing: {exc}")
 
     mailto_url = st.session_state.get(f"{key_prefix}_mailto")
     if mailto_url:
@@ -289,8 +383,8 @@ def render_share_mention_controls(mention, key_prefix):
             use_container_width=True,
         )
         st.caption(
-            "This opens the computer's default email application. "
-            "Set Outlook as the default handler for email links."
+            "The selected registered users are added to the recipient field. "
+            "This opens the computer's default email application."
         )
 
 
