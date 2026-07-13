@@ -391,14 +391,14 @@ def render_share_mention_controls(mention, key_prefix):
 
 
 def load_daily_report_mentions(target_date):
-    """Return mentions inserted or explicitly included for a report date."""
+    """Return eligible mentions inserted or explicitly included for a report date."""
     start_iso = datetime.combine(target_date, datetime.min.time()).isoformat()
     end_iso = datetime.combine(target_date, datetime.max.time()).isoformat()
 
     selected_fields = (
         "id, title, url, outlet_platform, theme, status, recommendation, "
         "brands_affected, alert_level, assigned_to_user, date_published, "
-        "inserted_at, sentiment_category, sentiment_score, "
+        "inserted_at, sentiment_category, sentiment_score, sentiment_rationale, "
         "ai_action_recommendation, naming_error_flag, data_conflict_flag, "
         "data_conflict_details, include_in_daily_report, daily_report_date"
     )
@@ -408,6 +408,7 @@ def load_daily_report_mentions(target_date):
         .select(selected_fields)
         .gte("inserted_at", start_iso)
         .lte("inserted_at", end_iso)
+        .neq("status", "noise")
         .execute()
     )
 
@@ -416,13 +417,36 @@ def load_daily_report_mentions(target_date):
         .select(selected_fields)
         .eq("include_in_daily_report", True)
         .eq("daily_report_date", target_date.isoformat())
+        .neq("status", "noise")
         .execute()
     )
 
     unique_mentions = {}
-    for mention in inserted_response.data or []:
-        unique_mentions[mention["id"]] = mention
-    for mention in included_response.data or []:
+
+    for mention in (inserted_response.data or []) + (included_response.data or []):
+        status = str(mention.get("status") or "").strip().lower()
+        recommendation = str(
+            mention.get("recommendation") or ""
+        ).strip().lower()
+
+        sentiment_rationale = str(
+            mention.get("sentiment_rationale") or ""
+        ).strip().lower()
+        ai_recommendation = str(
+            mention.get("ai_action_recommendation") or ""
+        ).strip().lower()
+
+        is_noise = (
+            status == "noise"
+            or recommendation == "ignore"
+            or sentiment_rationale.startswith("suppressed noise")
+            or "suppressed noise" in sentiment_rationale
+            or ai_recommendation == "ignore"
+        )
+
+        if is_noise:
+            continue
+
         unique_mentions[mention["id"]] = mention
 
     return list(unique_mentions.values())
@@ -1327,10 +1351,33 @@ elif app_mode == "📝 Report Builder":
         
         # Pull the custom daily prompt from Supabase
         try:
-            tmpl_res = supabase.table("monitor_templates").select("*").eq("template_name", "Daily Triage Rollup").execute()
-            daily_instruction = tmpl_res.data[0]["system_instruction_prompt"]
+            tmpl_res = (
+                supabase.table("monitor_templates")
+                .select("*")
+                .eq("template_name", "Daily Triage Rollup")
+                .execute()
+            )
+            stored_daily_instruction = (
+                tmpl_res.data[0]["system_instruction_prompt"]
+                if tmpl_res.data
+                else ""
+            )
         except Exception:
-            daily_instruction = "You are a PR assistant for AIA Canada. Summarize the day's media mentions briefly."
+            stored_daily_instruction = ""
+
+        daily_instruction = f"""
+{stored_daily_instruction}
+
+MANDATORY DAILY REPORT EXCLUSION RULES:
+- The supplied records have already been filtered for report eligibility.
+- Do not include, summarize, count, reference, or create a section for noise.
+- Do not create a section named "Filtered Noise".
+- Do not include records whose status is noise.
+- Do not include records whose recommendation is ignore.
+- Build the report only from the eligible records supplied in the user message.
+- If an earlier instruction conflicts with these exclusion rules, these rules
+  take precedence.
+"""
 
         if st.button(
             "Generate Daily Rollup",
@@ -1338,6 +1385,8 @@ elif app_mode == "📝 Report Builder":
             type="primary",
             key="generate_daily_rollup",
         ):
+            st.session_state.pop("latest_daily_report", None)
+
             with st.spinner("Extracting records for the selected daily report..."):
                 try:
                     daily_mentions = load_daily_report_mentions(target_date)
@@ -1353,7 +1402,10 @@ elif app_mode == "📝 Report Builder":
                             contents=[
                                 (
                                     f"Daily report date: {target_date.isoformat()}\n\n"
-                                    f"Daily media records:\n{daily_mentions}"
+                                    "The records below have already been filtered to exclude "
+                                    "noise and ignored items. Do not add a Filtered Noise "
+                                    "section and do not mention excluded records.\n\n"
+                                    f"Eligible daily media records:\n{daily_mentions}"
                                 )
                             ],
                             config=types.GenerateContentConfig(
