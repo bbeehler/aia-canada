@@ -1368,15 +1368,26 @@ elif app_mode == "📝 Report Builder":
         daily_instruction = f"""
 {stored_daily_instruction}
 
-MANDATORY DAILY REPORT EXCLUSION RULES:
+MANDATORY DAILY REPORT OUTPUT RULES:
+- Begin the report with a section titled exactly "## Executive Summary".
+- The Executive Summary must be 3 to 5 concise sentences written for senior
+  leadership.
+- Summarize the day's overall media volume, dominant themes, overall sentiment,
+  highest-priority issue, affected AIA Canada sub-brands, and any immediate
+  action required.
+- Do not list every mention in the Executive Summary.
+- Do not invent trends, risks, actions, or conclusions not supported by the
+  supplied records.
+- After the Executive Summary, continue with the detailed daily roundup using
+  the structure requested by the saved report template.
 - The supplied records have already been filtered for report eligibility.
 - Do not include, summarize, count, reference, or create a section for noise.
 - Do not create a section named "Filtered Noise".
 - Do not include records whose status is noise.
 - Do not include records whose recommendation is ignore.
 - Build the report only from the eligible records supplied in the user message.
-- If an earlier instruction conflicts with these exclusion rules, these rules
-  take precedence.
+- If an earlier instruction conflicts with these output or exclusion rules,
+  these rules take precedence.
 """
 
         if st.button(
@@ -1402,9 +1413,14 @@ MANDATORY DAILY REPORT EXCLUSION RULES:
                             contents=[
                                 (
                                     f"Daily report date: {target_date.isoformat()}\n\n"
-                                    "The records below have already been filtered to exclude "
-                                    "noise and ignored items. Do not add a Filtered Noise "
-                                    "section and do not mention excluded records.\n\n"
+                                    "Start with a 3-to-5-sentence executive summary for "
+                                    "senior leadership covering volume, dominant themes, "
+                                    "overall sentiment, the highest-priority issue, affected "
+                                    "sub-brands and immediate action required. Then provide "
+                                    "the detailed roundup. The records below have already "
+                                    "been filtered to exclude noise and ignored items. Do not "
+                                    "add a Filtered Noise section and do not mention excluded "
+                                    "records.\n\n"
                                     f"Eligible daily media records:\n{daily_mentions}"
                                 )
                             ],
