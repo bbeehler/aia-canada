@@ -4,6 +4,7 @@ import pandas as pd
 import os
 import time
 from datetime import datetime, timedelta
+from urllib.parse import quote
 from supabase import create_client, Client
 from google import genai
 from google.genai import types
@@ -131,6 +132,204 @@ def send_assignment_notification(mention_id, mention_title, recipient, sender, m
             }).execute()
         except Exception as e:
             st.error(f"Failed to send notification: {e}")
+
+
+def get_app_record_url(mention_id):
+    """Return an absolute internal record URL when APP_BASE_URL is configured."""
+    base_url = st.secrets.get("APP_BASE_URL", "").strip().rstrip("/")
+    if base_url:
+        return f"{base_url}/?mention_id={mention_id}"
+    return f"/?mention_id={mention_id}"
+
+
+def build_mention_email_body(mention, additional_message=""):
+    """Build the plain-text body used by the email share link."""
+    brands = mention.get("brands_affected") or []
+    brand_text = ", ".join(brands) if isinstance(brands, list) else str(brands)
+    introduction = (
+        f"{additional_message.strip()}\n\n" if additional_message.strip() else ""
+    )
+
+    return f"""{introduction}AIA Canada Media Mention
+
+Title: {mention.get("title") or "Untitled"}
+Outlet: {mention.get("outlet_platform") or "Unknown"}
+Published: {mention.get("date_published") or "Unknown"}
+Assigned to: {mention.get("assigned_to_user") or "Unassigned"}
+Brand(s) affected: {brand_text or "Not specified"}
+Theme: {mention.get("theme") or "Not specified"}
+Sentiment: {mention.get("sentiment_category") or "Unknown"}
+Sentiment score: {mention.get("sentiment_score") if mention.get("sentiment_score") is not None else "N/A"}
+Alert level: {mention.get("alert_level") or "Not set"}
+Recommendation: {mention.get("recommendation") or "Not set"}
+
+AI recommendation:
+{mention.get("ai_action_recommendation") or "Not available"}
+
+Summary:
+{mention.get("snippet") or "No summary available."}
+
+Read article:
+{mention.get("url") or "Not available"}
+
+Open app workspace:
+{get_app_record_url(mention.get("id", ""))}
+"""
+
+
+def build_mailto_url(mention, recipient="", additional_message=""):
+    """Build a mailto URL for Outlook or the user's default email client."""
+    subject = f"AIA Canada Media Mention: {mention.get('title') or 'Untitled'}"
+    body = build_mention_email_body(mention, additional_message)
+
+    return (
+        f"mailto:{quote(recipient.strip(), safe='@,;')}"
+        f"?subject={quote(subject)}"
+        f"&body={quote(body)}"
+    )
+
+
+def mark_mention_for_daily_report(mention_id, report_date, shared_by):
+    """Mark a mention for explicit inclusion in a selected daily report."""
+    shared_at = datetime.now().astimezone().isoformat()
+
+    (
+        supabase.table("mentions")
+        .update({
+            "include_in_daily_report": True,
+            "daily_report_date": report_date.isoformat(),
+            "last_shared_at": shared_at,
+            "last_shared_by": shared_by,
+        })
+        .eq("id", mention_id)
+        .execute()
+    )
+
+    (
+        supabase.table("mention_actions")
+        .insert({
+            "mention_id": mention_id,
+            "action_note": (
+                f"Marked for the {report_date.isoformat()} daily media report "
+                "and prepared for email sharing."
+            ),
+            "performed_by": shared_by,
+        })
+        .execute()
+    )
+
+
+def render_share_mention_controls(mention, key_prefix):
+    """Render email-sharing and daily-report inclusion controls."""
+    st.markdown("#### 📧 Share Mention")
+
+    existing_report_date = mention.get("daily_report_date")
+    default_report_date = datetime.now().date()
+    if existing_report_date:
+        try:
+            default_report_date = datetime.fromisoformat(
+                str(existing_report_date)
+            ).date()
+        except ValueError:
+            pass
+
+    recipient = st.text_input(
+        "Recipient email address",
+        placeholder="name@example.com",
+        key=f"{key_prefix}_recipient",
+    )
+    report_date = st.date_input(
+        "Include in daily media report for",
+        value=default_report_date,
+        key=f"{key_prefix}_report_date",
+    )
+    additional_message = st.text_area(
+        "Optional email introduction",
+        placeholder="Please review this media mention.",
+        height=90,
+        key=f"{key_prefix}_message",
+    )
+
+    if mention.get("include_in_daily_report"):
+        st.info(
+            "This mention is already marked for the "
+            f"{mention.get('daily_report_date') or 'selected'} daily report."
+        )
+
+    if st.button(
+        "Mark for Daily Report & Prepare Email",
+        type="primary",
+        use_container_width=True,
+        key=f"{key_prefix}_prepare",
+        disabled=IS_VIEWER,
+    ):
+        try:
+            current_user = st.session_state.get("user_full_name") or "Unknown user"
+            mark_mention_for_daily_report(
+                mention_id=mention["id"],
+                report_date=report_date,
+                shared_by=current_user,
+            )
+            st.session_state[f"{key_prefix}_mailto"] = build_mailto_url(
+                mention=mention,
+                recipient=recipient,
+                additional_message=additional_message,
+            )
+            st.success(
+                f"Mention added to the {report_date.isoformat()} daily report."
+            )
+        except Exception as exc:
+            st.error(f"Unable to prepare the mention for sharing: {exc}")
+
+    mailto_url = st.session_state.get(f"{key_prefix}_mailto")
+    if mailto_url:
+        st.link_button(
+            "Open Email in Outlook",
+            mailto_url,
+            use_container_width=True,
+        )
+        st.caption(
+            "This opens the computer's default email application. "
+            "Set Outlook as the default handler for email links."
+        )
+
+
+def load_daily_report_mentions(target_date):
+    """Return mentions inserted or explicitly included for a report date."""
+    start_iso = datetime.combine(target_date, datetime.min.time()).isoformat()
+    end_iso = datetime.combine(target_date, datetime.max.time()).isoformat()
+
+    selected_fields = (
+        "id, title, url, outlet_platform, theme, status, recommendation, "
+        "brands_affected, alert_level, assigned_to_user, date_published, "
+        "inserted_at, sentiment_category, sentiment_score, "
+        "ai_action_recommendation, naming_error_flag, data_conflict_flag, "
+        "data_conflict_details, include_in_daily_report, daily_report_date"
+    )
+
+    inserted_response = (
+        supabase.table("mentions")
+        .select(selected_fields)
+        .gte("inserted_at", start_iso)
+        .lte("inserted_at", end_iso)
+        .execute()
+    )
+
+    included_response = (
+        supabase.table("mentions")
+        .select(selected_fields)
+        .eq("include_in_daily_report", True)
+        .eq("daily_report_date", target_date.isoformat())
+        .execute()
+    )
+
+    unique_mentions = {}
+    for mention in inserted_response.data or []:
+        unique_mentions[mention["id"]] = mention
+    for mention in included_response.data or []:
+        unique_mentions[mention["id"]] = mention
+
+    return list(unique_mentions.values())
 
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
 st.sidebar.title("📊 AIA Canada Monitor")
@@ -346,6 +545,12 @@ if "mention_id" in st.query_params:
             with a2:
                 new_auth_outlet = st.text_input("New Contact Outlet*", key=f"dl_new_out_{target_record['id']}")
         
+        st.markdown("---")
+        render_share_mention_controls(
+            mention=target_record,
+            key_prefix=f"direct_share_{target_record['id']}",
+        )
+
         st.markdown("---")
         m1, m2 = st.columns([1, 4])
         with m1:
@@ -685,6 +890,12 @@ elif app_mode == "📋 Reviewed Database Table":
                         new_auth_outlet = st.text_input("New Contact Outlet*", key=f"edit_new_out_{target_record['id']}")
                 
                 st.markdown("---")
+                render_share_mention_controls(
+                    mention=target_record,
+                    key_prefix=f"reviewed_share_{target_record['id']}",
+                )
+
+                st.markdown("---")
                 m1, m2 = st.columns([1, 4])
                 with m1:
                     if st.button("Save Changes", type="primary", use_container_width=True, key="save_changes_btn", disabled=IS_VIEWER):
@@ -774,29 +985,42 @@ elif app_mode == "📝 Report Builder":
         except Exception:
             daily_instruction = "You are a PR assistant for AIA Canada. Summarize the day's media mentions briefly."
 
-        if st.button("Generate Daily Rollup", use_container_width=True, type="primary"):
-            with st.spinner("Extracting today's processed logs..."):
-                # Define the start and end of the selected day to filter the database
-                start_iso = datetime.combine(target_date, datetime.min.time()).isoformat()
-                end_iso = datetime.combine(target_date, datetime.max.time()).isoformat()
-                
-                # Fetch records that entered the system on this date (Includes pending so recent items can be compiled)
-                raw_data = supabase.table("mentions").select("id, title, url, outlet_platform, theme, status, recommendation, brands_affected, alert_level, assigned_to_user, date_published, sentiment_score").gte("inserted_at", start_iso).lte("inserted_at", end_iso).execute()
-                
-                if not raw_data.data:
-                    st.warning("No media tracking records were processed or logged on this specific date.")
-                else:
-                    try:
+        if st.button(
+            "Generate Daily Rollup",
+            use_container_width=True,
+            type="primary",
+            key="generate_daily_rollup",
+        ):
+            with st.spinner("Extracting records for the selected daily report..."):
+                try:
+                    daily_mentions = load_daily_report_mentions(target_date)
+
+                    if not daily_mentions:
+                        st.warning(
+                            "No mentions were inserted or explicitly included "
+                            "for this daily report date."
+                        )
+                    else:
                         response = ai_client.models.generate_content(
                             model="gemini-2.5-flash",
-                            contents=[f"Daily Processed Logs:\n{str(raw_data.data)}"],
-                            config=types.GenerateContentConfig(system_instruction=daily_instruction)
+                            contents=[
+                                (
+                                    f"Daily report date: {target_date.isoformat()}\n\n"
+                                    f"Daily media records:\n{daily_mentions}"
+                                )
+                            ],
+                            config=types.GenerateContentConfig(
+                                system_instruction=daily_instruction
+                            ),
                         )
                         st.session_state["latest_daily_report"] = response.text
-                        st.success("Daily Report Generation Complete!")
-                    except Exception as e:
-                        st.error(f"Generation failed: {e}")
-                        
+                        st.success(
+                            f"Daily report generated from "
+                            f"{len(daily_mentions)} mention(s)."
+                        )
+                except Exception as exc:
+                    st.error(f"Daily report generation failed: {exc}")
+
         if "latest_daily_report" in st.session_state:
             st.markdown("---")
             st.markdown(st.session_state["latest_daily_report"])
@@ -815,7 +1039,19 @@ elif app_mode == "📝 Report Builder":
         if st.button("Generate Weekly Trend Document", use_container_width=True):
             with st.spinner("Compiling historical database records for processing with Gemini..."):
                 # Fetches the latest 100 items (Includes pending so recent items can be compiled)
-                raw_data = (supabase.table("mentions").select("id, title, url, outlet_platform, theme, status, recommendation, ""brands_affected, alert_level, assigned_to_user, date_published, ""sentiment_category, sentiment_score, naming_error_flag, ""data_conflict_flag, data_conflict_details").order("inserted_at", desc=True).limit(100).execute())
+                raw_data = (
+                    supabase.table("mentions")
+                    .select(
+                        "id, title, url, outlet_platform, theme, status, "
+                        "recommendation, brands_affected, alert_level, "
+                        "assigned_to_user, date_published, sentiment_category, "
+                        "sentiment_score, naming_error_flag, data_conflict_flag, "
+                        "data_conflict_details"
+                    )
+                    .order("inserted_at", desc=True)
+                    .limit(100)
+                    .execute()
+                )
                 
                 if not raw_data.data:
                     st.warning("No validated tracking records discovered.")
