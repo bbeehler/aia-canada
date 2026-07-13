@@ -3,7 +3,9 @@ import requests
 import pandas as pd
 import os
 import time
-from datetime import datetime, timedelta
+import json
+from datetime import datetime, timedelta, time as datetime_time
+from typing import Any
 from urllib.parse import quote
 from supabase import create_client, Client
 from google import genai
@@ -465,6 +467,215 @@ def format_auth_timestamp(value):
         return parsed.tz_convert("America/Toronto").strftime("%Y-%m-%d %I:%M %p %Z")
     except Exception:
         return str(value)
+
+
+
+# --- ASK AIA MEDIA DATABASE HELPERS ---
+ASK_AIA_TABLES = {
+    "mentions": {"date_field": "inserted_at", "order_field": "inserted_at"},
+    "mention_actions": {"date_field": "inserted_at", "order_field": "inserted_at"},
+    "media_contacts": {"date_field": None, "order_field": "full_name"},
+    "media_inquiries": {"date_field": "inserted_at", "order_field": "inserted_at"},
+    "inquiry_actions": {"date_field": "inserted_at", "order_field": "inserted_at"},
+    "monitor_users": {"date_field": None, "order_field": "full_name"},
+    "monitor_keywords": {"date_field": None, "order_field": "term"},
+    "monitor_templates": {"date_field": None, "order_field": "template_name"},
+    "notifications": {"date_field": "created_at", "order_field": "created_at"},
+}
+
+
+def fetch_all_table_rows(
+    table_name: str,
+    order_field: str | None = None,
+    date_field: str | None = None,
+    start_iso: str | None = None,
+    end_iso: str | None = None,
+    page_size: int = 1000,
+) -> list[dict[str, Any]]:
+    """Fetch every matching row and field from a Supabase table."""
+    rows: list[dict[str, Any]] = []
+    start_index = 0
+
+    while True:
+        end_index = start_index + page_size - 1
+        query = supabase.table(table_name).select("*")
+
+        if date_field and start_iso:
+            query = query.gte(date_field, start_iso)
+        if date_field and end_iso:
+            query = query.lte(date_field, end_iso)
+        if order_field:
+            query = query.order(order_field, desc=True)
+
+        response = query.range(start_index, end_index).execute()
+        page_rows = response.data or []
+        rows.extend(page_rows)
+
+        if len(page_rows) < page_size:
+            break
+
+        start_index += page_size
+
+    return rows
+
+
+def load_complete_ask_aia_context(
+    use_date_filter: bool,
+    start_date,
+    end_date,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
+    """Load all fields from all application tables, with optional date filtering."""
+    if use_date_filter:
+        start_iso = datetime.combine(start_date, datetime_time.min).astimezone().isoformat()
+        end_iso = datetime.combine(end_date, datetime_time.max).astimezone().isoformat()
+    else:
+        start_iso = None
+        end_iso = None
+
+    database_context: dict[str, list[dict[str, Any]]] = {}
+    table_errors: dict[str, str] = {}
+
+    for table_name, configuration in ASK_AIA_TABLES.items():
+        try:
+            database_context[table_name] = fetch_all_table_rows(
+                table_name=table_name,
+                order_field=configuration["order_field"],
+                date_field=configuration["date_field"],
+                start_iso=start_iso,
+                end_iso=end_iso,
+            )
+        except Exception as exc:
+            database_context[table_name] = []
+            table_errors[table_name] = str(exc)
+
+    return database_context, table_errors
+
+
+def split_database_context(
+    database_context: dict[str, list[dict[str, Any]]],
+    maximum_characters: int = 120_000,
+) -> list[str]:
+    """Split complete database content into model-safe JSON batches."""
+    chunks: list[str] = []
+    current_records: list[dict[str, Any]] = []
+    current_size = 0
+
+    for table_name, rows in database_context.items():
+        if not rows:
+            wrapped_record = {
+                "table": table_name,
+                "record": None,
+                "message": "No matching records.",
+            }
+            encoded = json.dumps(wrapped_record, default=str)
+
+            if current_records and current_size + len(encoded) > maximum_characters:
+                chunks.append(json.dumps(current_records, default=str))
+                current_records = []
+                current_size = 0
+
+            current_records.append(wrapped_record)
+            current_size += len(encoded)
+            continue
+
+        for row in rows:
+            wrapped_record = {"table": table_name, "record": row}
+            encoded = json.dumps(wrapped_record, default=str)
+
+            if current_records and current_size + len(encoded) > maximum_characters:
+                chunks.append(json.dumps(current_records, default=str))
+                current_records = []
+                current_size = 0
+
+            current_records.append(wrapped_record)
+            current_size += len(encoded)
+
+    if current_records:
+        chunks.append(json.dumps(current_records, default=str))
+
+    return chunks
+
+
+def analyse_database_chunk(
+    user_question: str,
+    chunk_text: str,
+    chunk_number: int,
+    total_chunks: int,
+) -> str:
+    """Extract question-relevant evidence from one complete database batch."""
+    extraction_instruction = """
+You are an evidence extraction system for AIA Canada's media-monitoring database.
+
+Review every supplied record and every supplied field.
+
+Rules:
+1. Extract only facts relevant to the user's question.
+2. Do not invent facts or infer unsupported intent.
+3. Preserve exact IDs, names, dates, statuses, scores, recommendations and relationships.
+4. Match related records using id, mention_id, inquiry_id, contact_id,
+   author_contact_id and user_id.
+5. Distinguish date_published from inserted_at and created_at.
+6. Include conflicting, missing or incomplete values when they affect the answer.
+7. State plainly when the batch contains no relevant evidence.
+8. Never expose passwords, API keys, access tokens or service-role keys.
+9. Keep the extraction compact without omitting relevant evidence.
+"""
+
+    response = ai_client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=(
+            f"User question:\n{user_question}\n\n"
+            f"Database batch {chunk_number} of {total_chunks}:\n{chunk_text}"
+        ),
+        config=types.GenerateContentConfig(system_instruction=extraction_instruction),
+    )
+    return response.text
+
+
+def generate_final_ask_aia_answer(
+    user_question: str,
+    extracted_evidence: list[str],
+    table_counts: dict[str, int],
+    table_errors: dict[str, str],
+    date_scope: str,
+) -> str:
+    """Create one final answer from evidence extracted from every database batch."""
+    synthesis_instruction = """
+You are the internal media-monitoring data analyst for AIA Canada.
+
+Answer the user's question using only the extracted database evidence.
+
+Rules:
+1. Do not invent facts.
+2. State clearly when the records do not contain enough information.
+3. Reconcile related records using their IDs.
+4. Distinguish publication dates from insertion and creation dates.
+5. Include relevant counts, owners, contacts, actions, recommendations,
+   statuses, sentiment values and source records.
+6. State the date scope used.
+7. When useful, identify the source table and record ID.
+8. Mention any table that could not be read if that limitation affects the answer.
+9. Keep the response clear, operational and concise.
+10. Never expose passwords, API keys, access tokens or service-role keys.
+"""
+
+    evidence_text = "\n\n".join(
+        f"Evidence batch {index + 1}:\n{evidence}"
+        for index, evidence in enumerate(extracted_evidence)
+    )
+
+    response = ai_client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=(
+            f"User question:\n{user_question}\n\n"
+            f"Date scope:\n{date_scope}\n\n"
+            f"Rows reviewed by table:\n{json.dumps(table_counts, indent=2)}\n\n"
+            f"Table read errors:\n{json.dumps(table_errors, indent=2)}\n\n"
+            f"Evidence from all database batches:\n{evidence_text}"
+        ),
+        config=types.GenerateContentConfig(system_instruction=synthesis_instruction),
+    )
+    return response.text
 
 
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
@@ -1210,34 +1421,156 @@ elif app_mode == "📝 Report Builder":
 # --- MODULE 5: DATABASE Q&A ASSISTANT ---
 elif app_mode == "💬 Ask AIA Media":
     st.subheader("💬 Ask AIA Media")
-    user_query = st.text_input("Enter your tracking question:", placeholder="Ask about trends, owners, or entries...")
-    
-    if user_query:
-        with st.spinner("Scanning logs..."):
+    st.write(
+        "Ask questions across all fields in the application database. "
+        "Optionally restrict timestamped records by date, or search the complete history."
+    )
+
+    use_date_filter = st.checkbox(
+        "Restrict timestamped records to a date range",
+        value=False,
+        key="ask_aia_use_date_filter",
+    )
+
+    ask_start_date = None
+    ask_end_date = None
+
+    if use_date_filter:
+        date_col1, date_col2 = st.columns(2)
+
+        with date_col1:
+            ask_start_date = st.date_input(
+                "Start insertion date",
+                value=datetime.now().date() - timedelta(days=7),
+                key="ask_aia_start_date",
+            )
+
+        with date_col2:
+            ask_end_date = st.date_input(
+                "End insertion date",
+                value=datetime.now().date(),
+                key="ask_aia_end_date",
+            )
+
+        st.caption(
+            "The range applies to inserted_at or created_at where those fields exist. "
+            "Reference tables without timestamps are included in full."
+        )
+
+    user_query = st.text_area(
+        "Enter your database question",
+        placeholder=(
+            "Examples: Which mentions required action last month? "
+            "Which reporters have open inquiries? "
+            "What actions were recorded for CCIF coverage?"
+        ),
+        key="ask_aia_query",
+        height=120,
+    )
+
+    if st.button(
+        "Search Complete Database",
+        type="primary",
+        use_container_width=True,
+        key="ask_aia_submit",
+    ):
+        if not user_query.strip():
+            st.error("Enter a question before searching.")
+        elif use_date_filter and ask_start_date > ask_end_date:
+            st.error("The start date cannot be after the end date.")
+        else:
             try:
-                # 1. Fetch the data
-                all_mentions = supabase.table("mentions").select("title, outlet_platform, theme, sentiment_category, assigned_to_user, alert_level").limit(150).execute()
-                
-                import json
-                # 2. Convert raw Python dictionaries into safely escaped, clean JSON for the AI to read
-                clean_context = json.dumps(all_mentions.data, indent=2)
-                
-                qa_instruction = "You are an intelligent data specialist tracking brand awareness for AIA Canada. Answer using only the provided context."
-                
-                # 3. Pass the clean string to Gemini
-                response = ai_client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=f"Context:\n{clean_context}\n\nQuery: {user_query}",
-                    config=types.GenerateContentConfig(system_instruction=qa_instruction)
-                )
-                
-                st.info(response.text)
-                
-            except Exception as e:
-                # 4. If Gemini rejects the payload, this explicitly catches the error and forces Streamlit 
-                # to print the real error text to the screen instead of redacting it!
-                st.error(f"⚠️ API Error Details: {str(e)}")
-                
+                with st.spinner("Loading all matching rows and fields..."):
+                    database_context, table_errors = load_complete_ask_aia_context(
+                        use_date_filter=use_date_filter,
+                        start_date=ask_start_date,
+                        end_date=ask_end_date,
+                    )
+
+                table_counts = {
+                    table_name: len(rows)
+                    for table_name, rows in database_context.items()
+                }
+                total_records = sum(table_counts.values())
+
+                if total_records == 0:
+                    st.warning("No database records matched the selected scope.")
+                else:
+                    context_chunks = split_database_context(database_context)
+                    progress = st.progress(0)
+                    status_text = st.empty()
+                    extracted_evidence: list[str] = []
+
+                    for index, chunk_text in enumerate(context_chunks):
+                        status_text.write(
+                            f"Analysing database batch {index + 1} "
+                            f"of {len(context_chunks)}..."
+                        )
+                        extracted_evidence.append(
+                            analyse_database_chunk(
+                                user_question=user_query.strip(),
+                                chunk_text=chunk_text,
+                                chunk_number=index + 1,
+                                total_chunks=len(context_chunks),
+                            )
+                        )
+                        progress.progress((index + 1) / len(context_chunks))
+
+                    if use_date_filter:
+                        date_scope = (
+                            f"Timestamped records from {ask_start_date.isoformat()} "
+                            f"through {ask_end_date.isoformat()}; untimestamped "
+                            "reference tables included in full."
+                        )
+                    else:
+                        date_scope = (
+                            "Complete available application history; "
+                            "no date filter was applied."
+                        )
+
+                    status_text.write("Preparing final answer...")
+                    final_answer = generate_final_ask_aia_answer(
+                        user_question=user_query.strip(),
+                        extracted_evidence=extracted_evidence,
+                        table_counts=table_counts,
+                        table_errors=table_errors,
+                        date_scope=date_scope,
+                    )
+
+                    st.session_state["ask_aia_latest_answer"] = final_answer
+                    st.session_state["ask_aia_table_counts"] = table_counts
+                    st.session_state["ask_aia_table_errors"] = table_errors
+                    st.session_state["ask_aia_date_scope"] = date_scope
+
+                    status_text.empty()
+                    progress.empty()
+
+            except Exception as exc:
+                st.error(f"Ask AIA Media failed: {exc}")
+
+    if "ask_aia_latest_answer" in st.session_state:
+        st.markdown("---")
+        st.markdown("### Answer")
+        st.markdown(st.session_state["ask_aia_latest_answer"])
+
+        with st.expander("Database coverage used for this answer"):
+            st.write(st.session_state["ask_aia_date_scope"])
+
+            coverage_df = pd.DataFrame(
+                [
+                    {"Table": table_name, "Rows reviewed": row_count}
+                    for table_name, row_count
+                    in st.session_state["ask_aia_table_counts"].items()
+                ]
+            )
+            st.dataframe(coverage_df, use_container_width=True, hide_index=True)
+
+            table_errors = st.session_state.get("ask_aia_table_errors", {})
+            if table_errors:
+                st.warning("Some tables could not be read.")
+                for table_name, error_text in table_errors.items():
+                    st.write(f"- **{table_name}:** {error_text}")
+
 # --- MODULE 6: SYSTEM SETTINGS DASHBOARD ---
 elif app_mode == "⚙️ System Settings Dashboard":
     st.subheader("⚙️ System Settings & Parameter Tuning Dashboard")
