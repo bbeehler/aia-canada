@@ -425,6 +425,48 @@ def load_daily_report_mentions(target_date):
 
     return list(unique_mentions.values())
 
+
+@st.cache_data(ttl=300)
+def load_auth_login_status():
+    """Return Supabase Auth login metadata keyed by user ID."""
+    try:
+        admin_client = create_client(
+            st.secrets["SUPABASE_URL"],
+            st.secrets["SUPABASE_SERVICE_ROLE_KEY"],
+        )
+        response = admin_client.auth.admin.list_users(page=1, per_page=1000)
+
+        if isinstance(response, list):
+            auth_users = response
+        else:
+            auth_users = getattr(response, "users", [])
+
+        return {
+            str(user.id): {
+                "email": getattr(user, "email", None),
+                "created_at": getattr(user, "created_at", None),
+                "last_sign_in_at": getattr(user, "last_sign_in_at", None),
+                "confirmed_at": getattr(user, "confirmed_at", None),
+            }
+            for user in auth_users
+        }
+    except Exception as exc:
+        st.error(f"Unable to load authentication activity: {exc}")
+        return {}
+
+
+def format_auth_timestamp(value):
+    """Format a Supabase Auth timestamp for display."""
+    if not value:
+        return "Not recorded"
+
+    try:
+        parsed = pd.to_datetime(value, utc=True)
+        return parsed.tz_convert("America/Toronto").strftime("%Y-%m-%d %I:%M %p %Z")
+    except Exception:
+        return str(value)
+
+
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
 st.sidebar.title("📊 AIA Canada Monitor")
 st.sidebar.caption(f"Operator: {st.session_state['user_full_name']} ({USER_ROLE})")
@@ -1250,50 +1292,152 @@ elif app_mode == "⚙️ System Settings Dashboard":
         st.markdown("---")
         st.markdown("### 🛠️ Profile Management & Security Resets")
         u_res = supabase.table("monitor_users").select("*").order("full_name").execute()
-        
+        auth_login_status = load_auth_login_status() if IS_ADMIN else {}
+
         if u_res.data:
             for current_row in u_res.data:
-                is_own_profile = current_row['user_id'] == st.session_state["auth_user"].id
+                user_id = str(current_row["user_id"])
+                is_own_profile = (
+                    st.session_state.get("auth_user")
+                    and str(st.session_state["auth_user"].id) == user_id
+                )
+
                 if not IS_ADMIN and not is_own_profile:
                     continue
-                    
-                with st.expander(f"👤 {current_row['full_name']} | Role: {current_row['user_role']} ({current_row['tracking_email']})"):
+
+                auth_status = auth_login_status.get(user_id, {})
+                last_sign_in_at = auth_status.get("last_sign_in_at")
+                account_created_at = auth_status.get("created_at")
+                confirmed_at = auth_status.get("confirmed_at")
+                has_logged_in = bool(last_sign_in_at)
+
+                if is_own_profile:
+                    login_badge = "🟢 Current session"
+                elif has_logged_in:
+                    login_badge = "✅ Has logged in"
+                else:
+                    login_badge = "⚪ Never logged in"
+
+                with st.expander(
+                    f"👤 {current_row['full_name']} | "
+                    f"Role: {current_row['user_role']} | {login_badge}"
+                ):
+                    if IS_ADMIN:
+                        status_col1, status_col2, status_col3 = st.columns(3)
+
+                        with status_col1:
+                            st.metric(
+                                "Login status",
+                                "Logged in before" if has_logged_in else "Never logged in",
+                            )
+
+                        with status_col2:
+                            st.markdown("**Last successful login**")
+                            st.write(format_auth_timestamp(last_sign_in_at))
+
+                        with status_col3:
+                            st.markdown("**Auth account created**")
+                            st.write(format_auth_timestamp(account_created_at))
+
+                        if is_own_profile:
+                            st.success("This is the account currently signed into this app session.")
+
+                        if confirmed_at:
+                            st.caption(
+                                f"Account confirmed: {format_auth_timestamp(confirmed_at)}"
+                            )
+                        else:
+                            st.warning("No account confirmation timestamp is available.")
+
+                        st.markdown("---")
+
                     col_e1, col_e2 = st.columns(2)
+
                     with col_e1:
-                        current_role_idx = ["Administrator", "Editor", "Viewer"].index(current_row['user_role'])
-                        update_role_selection = st.selectbox(
-                            "Modify Privileges Role", 
-                            ["Administrator", "Editor", "Viewer"], 
-                            index=current_role_idx, 
-                            key=f"edit_role_select_{current_row['id']}",
-                            disabled=not IS_ADMIN
+                        role_options = ["Administrator", "Editor", "Viewer"]
+                        current_role = (
+                            current_row["user_role"]
+                            if current_row["user_role"] in role_options
+                            else "Viewer"
                         )
-                        if st.button("Overwrite Access Role", key=f"save_role_btn_{current_row['id']}", disabled=not IS_ADMIN):
-                            supabase.table("monitor_users").update({"user_role": update_role_selection}).eq("id", current_row['id']).execute()
+                        update_role_selection = st.selectbox(
+                            "Modify Privileges Role",
+                            role_options,
+                            index=role_options.index(current_role),
+                            key=f"edit_role_select_{current_row['id']}",
+                            disabled=not IS_ADMIN,
+                        )
+
+                        if st.button(
+                            "Overwrite Access Role",
+                            key=f"save_role_btn_{current_row['id']}",
+                            disabled=not IS_ADMIN,
+                        ):
+                            (
+                                supabase.table("monitor_users")
+                                .update({"user_role": update_role_selection})
+                                .eq("id", current_row["id"])
+                                .execute()
+                            )
                             st.success("User privilege profile updated.")
                             st.rerun()
-                            
+
                     with col_e2:
-                        overwrite_password_string = st.text_input("Overwrite Password / Force Reset", type="password", key=f"reset_pass_field_{current_row['id']}", placeholder="Type new credentials string...")
-                        if st.button("Deploy New Password Overwrite", key=f"save_pass_btn_{current_row['id']}"):
-                            if len(overwrite_password_string) >= 6:
+                        overwrite_password_string = st.text_input(
+                            "Overwrite Password / Force Reset",
+                            type="password",
+                            key=f"reset_pass_field_{current_row['id']}",
+                            placeholder="Type new credentials string...",
+                            disabled=not IS_ADMIN,
+                        )
+
+                        if st.button(
+                            "Deploy New Password Overwrite",
+                            key=f"save_pass_btn_{current_row['id']}",
+                            disabled=not IS_ADMIN,
+                        ):
+                            if len(overwrite_password_string) < 6:
+                                st.error("Password strings must be at least 6 characters.")
+                            else:
                                 try:
-                                    supabase.auth.admin.update_user_by_id(current_row['user_id'], {"password": overwrite_password_string})
+                                    admin_client = create_client(
+                                        st.secrets["SUPABASE_URL"],
+                                        st.secrets["SUPABASE_SERVICE_ROLE_KEY"],
+                                    )
+                                    admin_client.auth.admin.update_user_by_id(
+                                        current_row["user_id"],
+                                        {"password": overwrite_password_string},
+                                    )
                                     st.success("Security token updated successfully!")
                                 except Exception as pass_err:
                                     st.error(f"Password overwrite failed: {pass_err}")
-                            else:
-                                st.error("Password strings must be at least 6 characters.")
-                    
+
                     if IS_ADMIN:
                         st.markdown("---")
-                        if st.button("❌ Terminate Account & Wipe Platform Data Logs", key=f"wipe_user_btn_{current_row['id']}", type="primary", use_container_width=True):
+                        if st.button(
+                            "❌ Terminate Account & Wipe Platform Data Logs",
+                            key=f"wipe_user_btn_{current_row['id']}",
+                            type="primary",
+                            use_container_width=True,
+                        ):
                             try:
-                                supabase.auth.admin.delete_user(current_row['user_id'])
-                            except Exception:
-                                pass
-                            supabase.table("monitor_users").delete().eq("id", current_row['id']).execute()
-                            st.success("Identity vectors cleared.")
+                                admin_client = create_client(
+                                    st.secrets["SUPABASE_URL"],
+                                    st.secrets["SUPABASE_SERVICE_ROLE_KEY"],
+                                )
+                                admin_client.auth.admin.delete_user(
+                                    current_row["user_id"]
+                                )
+                            except Exception as exc:
+                                st.warning(f"Auth account deletion warning: {exc}")
+
+                            (
+                                supabase.table("monitor_users")
+                                .delete()
+                                .eq("id", current_row["id"])
+                                .execute()
+                            )
+                            st.success("Account removed.")
                             st.rerun()
 
     # 2. KEYWORD MANAGEMENT LAYOUT
