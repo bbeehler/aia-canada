@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import os
+import re
 import time
 import json
 from datetime import datetime, timedelta, time as datetime_time
@@ -700,6 +701,21 @@ Rules:
         config=types.GenerateContentConfig(system_instruction=synthesis_instruction),
     )
     return response.text
+
+
+
+def remove_existing_executive_summary(report_text):
+    """Remove an AI-generated executive summary before adding the required one."""
+    if not report_text:
+        return ""
+
+    pattern = re.compile(
+        r"^\s*#{1,3}\s*Executive Summary\s*\n+.*?"
+        r"(?=\n#{1,3}\s+|\Z)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cleaned_text = pattern.sub("", report_text, count=1).strip()
+    return cleaned_text or report_text.strip()
 
 
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
@@ -1408,19 +1424,46 @@ MANDATORY DAILY REPORT OUTPUT RULES:
                             "for this daily report date."
                         )
                     else:
-                        response = ai_client.models.generate_content(
+                        executive_summary_instruction = """
+You are the senior media monitoring analyst for AIA Canada.
+
+Write only the Executive Summary for a daily media report.
+
+Mandatory requirements:
+- Write 3 to 5 concise sentences for senior leadership.
+- State the total number of eligible mentions.
+- Identify the dominant themes and overall sentiment.
+- Identify the highest-priority issue, if one exists.
+- Name the affected AIA Canada sub-brands supported by the records.
+- State any immediate action required.
+- Do not include a heading.
+- Do not use bullet points or tables.
+- Do not mention noise, ignored records or excluded records.
+- Do not invent facts.
+"""
+
+                        summary_response = ai_client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=[
+                                (
+                                    f"Daily report date: {target_date.isoformat()}\n"
+                                    f"Eligible mention count: {len(daily_mentions)}\n\n"
+                                    f"Eligible daily media records:\n{daily_mentions}"
+                                )
+                            ],
+                            config=types.GenerateContentConfig(
+                                system_instruction=executive_summary_instruction
+                            ),
+                        )
+
+                        detail_response = ai_client.models.generate_content(
                             model="gemini-2.5-flash",
                             contents=[
                                 (
                                     f"Daily report date: {target_date.isoformat()}\n\n"
-                                    "Start with a 3-to-5-sentence executive summary for "
-                                    "senior leadership covering volume, dominant themes, "
-                                    "overall sentiment, the highest-priority issue, affected "
-                                    "sub-brands and immediate action required. Then provide "
-                                    "the detailed roundup. The records below have already "
-                                    "been filtered to exclude noise and ignored items. Do not "
-                                    "add a Filtered Noise section and do not mention excluded "
-                                    "records.\n\n"
+                                    "Prepare the detailed daily roundup from the eligible "
+                                    "records below. Do not mention noise or ignored records. "
+                                    "Do not create a Filtered Noise section.\n\n"
                                     f"Eligible daily media records:\n{daily_mentions}"
                                 )
                             ],
@@ -1428,7 +1471,28 @@ MANDATORY DAILY REPORT OUTPUT RULES:
                                 system_instruction=daily_instruction
                             ),
                         )
-                        st.session_state["latest_daily_report"] = response.text
+
+                        executive_summary = (
+                            summary_response.text.strip()
+                            if summary_response.text
+                            else (
+                                f"{len(daily_mentions)} eligible media mention(s) "
+                                "were included in this daily report. "
+                                "The available records did not produce an AI-generated "
+                                "executive summary."
+                            )
+                        )
+                        detailed_report = remove_existing_executive_summary(
+                            detail_response.text
+                        )
+
+                        final_report = (
+                            "## Executive Summary\n\n"
+                            f"{executive_summary}\n\n"
+                            f"{detailed_report}"
+                        ).strip()
+
+                        st.session_state["latest_daily_report"] = final_report
                         st.success(
                             f"Daily report generated from "
                             f"{len(daily_mentions)} mention(s)."
@@ -1443,47 +1507,135 @@ MANDATORY DAILY REPORT OUTPUT RULES:
     # --- WEEKLY REPORT TAB ---
     with tab_weekly:
         st.markdown("### Generate Weekly Trend Analysis")
-        st.write("Compiles a broad, macro-level summary of industry trends from the last 100 processed tracking items.")
-        
+        st.write(
+            "Select a week-ending date. The report analyzes mentions inserted "
+            "during the seven-day period ending on that date."
+        )
+
+        weekly_end_date = st.date_input(
+            "Select Week Ending Date",
+            value=datetime.now().date(),
+            key="weekly_trend_end_date",
+        )
+        weekly_start_date = weekly_end_date - timedelta(days=6)
+
+        st.caption(
+            f"Reporting period: {weekly_start_date.isoformat()} through "
+            f"{weekly_end_date.isoformat()} (based on database insertion date)."
+        )
+
         try:
-            tmpl_res = supabase.table("monitor_templates").select("*").eq("template_name", "Weekly Trend Summary").execute()
+            tmpl_res = (
+                supabase.table("monitor_templates")
+                .select("*")
+                .eq("template_name", "Weekly Trend Summary")
+                .execute()
+            )
             weekly_instruction = tmpl_res.data[0]["system_instruction_prompt"]
         except Exception:
-            weekly_instruction = "You are the senior media monitoring AI analyst for AIA Canada. Format using CP rules."
+            weekly_instruction = (
+                "You are the senior media monitoring AI analyst for AIA Canada. "
+                "Draft a factual weekly trend summary using Canadian Press style."
+            )
 
-        if st.button("Generate Weekly Trend Document", use_container_width=True):
-            with st.spinner("Compiling historical database records for processing with Gemini..."):
-                # Fetches the latest 100 items (Includes pending so recent items can be compiled)
+        if st.button(
+            "Generate Weekly Trend Document",
+            use_container_width=True,
+            type="primary",
+            key="generate_weekly_trend_document",
+        ):
+            st.session_state.pop("latest_weekly_report", None)
+
+            with st.spinner("Compiling records inserted during the selected week..."):
+                start_iso = datetime.combine(
+                    weekly_start_date,
+                    datetime.min.time(),
+                ).isoformat()
+                end_iso = datetime.combine(
+                    weekly_end_date,
+                    datetime.max.time(),
+                ).isoformat()
+
                 raw_data = (
                     supabase.table("mentions")
                     .select(
                         "id, title, url, outlet_platform, theme, status, "
                         "recommendation, brands_affected, alert_level, "
-                        "assigned_to_user, date_published, sentiment_category, "
-                        "sentiment_score, naming_error_flag, data_conflict_flag, "
-                        "data_conflict_details"
+                        "assigned_to_user, date_published, inserted_at, "
+                        "sentiment_category, sentiment_score, "
+                        "naming_error_flag, data_conflict_flag, "
+                        "data_conflict_details, ai_action_recommendation"
                     )
+                    .gte("inserted_at", start_iso)
+                    .lte("inserted_at", end_iso)
+                    .neq("status", "noise")
+                    .neq("recommendation", "ignore")
                     .order("inserted_at", desc=True)
-                    .limit(100)
                     .execute()
                 )
-                
-                if not raw_data.data:
-                    st.warning("No validated tracking records discovered.")
+
+                weekly_records = [
+                    record
+                    for record in (raw_data.data or [])
+                    if str(record.get("status") or "").lower() != "noise"
+                    and str(record.get("recommendation") or "").lower() != "ignore"
+                ]
+
+                if not weekly_records:
+                    st.warning(
+                        "No reportable mentions were inserted during the selected week."
+                    )
                 else:
                     try:
+                        reporting_instruction = (
+                            f"{weekly_instruction}\n\n"
+                            "MANDATORY REPORTING SCOPE:\n"
+                            f"- Analyze only records inserted from "
+                            f"{weekly_start_date.isoformat()} through "
+                            f"{weekly_end_date.isoformat()}.\n"
+                            "- Use inserted_at to define the reporting period.\n"
+                            "- date_published is contextual information only.\n"
+                            "- Do not include records marked as noise or ignore.\n"
+                            "- Ground every finding strictly in the supplied records.\n"
+                            "- Include the exact sections required by the saved Weekly "
+                            "Trend Summary template."
+                        )
+
                         response = ai_client.models.generate_content(
                             model="gemini-2.5-flash",
-                            contents=[f"Historical Logs:\n{str(raw_data.data)}"],
-                            config=types.GenerateContentConfig(system_instruction=weekly_instruction)
+                            contents=[
+                                (
+                                    f"Weekly reporting period: "
+                                    f"{weekly_start_date.isoformat()} to "
+                                    f"{weekly_end_date.isoformat()}\n\n"
+                                    f"Records inserted during this period:\n"
+                                    f"{weekly_records}"
+                                )
+                            ],
+                            config=types.GenerateContentConfig(
+                                system_instruction=reporting_instruction
+                            ),
                         )
+
                         st.session_state["latest_weekly_report"] = response.text
-                        st.success("Weekly Report Generation Complete!")
+                        st.session_state["latest_weekly_report_period"] = (
+                            f"{weekly_start_date.isoformat()} to "
+                            f"{weekly_end_date.isoformat()}"
+                        )
+                        st.success(
+                            f"Weekly Trend Summary generated from "
+                            f"{len(weekly_records)} mention(s)."
+                        )
                     except Exception as e:
                         st.error(f"Generation failed: {e}")
-                    
+
         if "latest_weekly_report" in st.session_state:
             st.markdown("---")
+            report_period = st.session_state.get(
+                "latest_weekly_report_period",
+                "Selected reporting period",
+            )
+            st.caption(f"Report period: {report_period}")
             st.markdown(st.session_state["latest_weekly_report"])
 
 # --- MODULE 5: DATABASE Q&A ASSISTANT ---
