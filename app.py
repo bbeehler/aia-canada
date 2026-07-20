@@ -718,6 +718,773 @@ def remove_existing_executive_summary(report_text):
     return cleaned_text or report_text.strip()
 
 
+
+def calculate_percentage_change(current_value: float, previous_value: float):
+    """Return percentage change, using None when no valid baseline exists."""
+    if previous_value == 0:
+        return None if current_value == 0 else float("inf")
+    return ((current_value - previous_value) / previous_value) * 100
+
+
+def format_metric_delta(current_value: float, previous_value: float, suffix: str = "") -> str:
+    """Format a Streamlit metric delta."""
+    difference = current_value - previous_value
+    if isinstance(current_value, float) or isinstance(previous_value, float):
+        return f"{difference:+.2f}{suffix}"
+    return f"{difference:+}{suffix}"
+
+
+def fetch_reportable_mentions(start_date, end_date) -> list[dict]:
+    """Fetch non-noise, non-ignored mentions by database insertion date."""
+    start_iso = datetime.combine(start_date, datetime.min.time()).isoformat()
+    end_iso = datetime.combine(end_date, datetime.max.time()).isoformat()
+
+    response = (
+        supabase.table("mentions")
+        .select(
+            "id, title, snippet, url, outlet_platform, theme, status, "
+            "recommendation, brands_affected, alert_level, assigned_to_user, "
+            "date_published, inserted_at, sentiment_category, sentiment_score, "
+            "naming_error_flag, data_conflict_flag, data_conflict_details, "
+            "ai_action_recommendation"
+        )
+        .gte("inserted_at", start_iso)
+        .lte("inserted_at", end_iso)
+        .neq("status", "noise")
+        .neq("recommendation", "ignore")
+        .order("inserted_at")
+        .execute()
+    )
+
+    return [
+        record
+        for record in (response.data or [])
+        if str(record.get("status") or "").strip().lower() != "noise"
+        and str(record.get("recommendation") or "").strip().lower() != "ignore"
+        and "suppressed noise"
+        not in str(record.get("sentiment_rationale") or "").strip().lower()
+    ]
+
+
+def load_monitoring_keywords() -> list[dict]:
+    """Load configured monitoring keywords for quantitative matching."""
+    try:
+        response = (
+            supabase.table("monitor_keywords")
+            .select("term, brand_tags, theme_layer")
+            .order("term")
+            .execute()
+        )
+        return response.data or []
+    except Exception:
+        return []
+
+
+def normalize_sentiment_category(value) -> str:
+    """Normalize sentiment labels for consistent reporting."""
+    normalized = str(value or "Unknown").strip().title()
+    allowed = {"Positive", "Neutral", "Negative", "Mixed"}
+    return normalized if normalized in allowed else "Unknown"
+
+
+def records_to_weekly_dataframe(records: list[dict]) -> pd.DataFrame:
+    """Convert mention records into a normalized analytical dataframe."""
+    if not records:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(records)
+    frame["inserted_at"] = pd.to_datetime(frame["inserted_at"], errors="coerce", utc=True)
+    frame["insert_date"] = frame["inserted_at"].dt.date
+    frame["sentiment_category"] = frame["sentiment_category"].apply(
+        normalize_sentiment_category
+    )
+    frame["sentiment_score"] = pd.to_numeric(
+        frame["sentiment_score"], errors="coerce"
+    ).fillna(0.0)
+    frame["alert_level"] = frame["alert_level"].fillna("Not set")
+    frame["outlet_platform"] = frame["outlet_platform"].fillna("Unknown")
+    frame["theme"] = frame["theme"].fillna("Unclassified")
+    return frame
+
+
+def count_keyword_mentions(
+    records: list[dict],
+    keyword_rows: list[dict],
+) -> dict[str, int]:
+    """Count records containing each configured keyword."""
+    counts: dict[str, int] = {}
+
+    for keyword_row in keyword_rows:
+        term = str(keyword_row.get("term") or "").strip()
+        if not term:
+            continue
+
+        normalized_term = term.casefold()
+        count = 0
+
+        for record in records:
+            searchable_values = [
+                record.get("title"),
+                record.get("snippet"),
+                record.get("theme"),
+                " ".join(record.get("brands_affected") or []),
+            ]
+            searchable_text = " ".join(
+                str(value) for value in searchable_values if value
+            ).casefold()
+
+            if normalized_term in searchable_text:
+                count += 1
+
+        counts[term] = count
+
+    return counts
+
+
+def build_weekly_quantitative_package(
+    current_records: list[dict],
+    previous_records: list[dict],
+    keyword_rows: list[dict],
+    current_start,
+    current_end,
+    previous_start,
+    previous_end,
+) -> dict:
+    """Build measured week-over-week reporting data."""
+    current_df = records_to_weekly_dataframe(current_records)
+    previous_df = records_to_weekly_dataframe(previous_records)
+
+    current_volume = len(current_df)
+    previous_volume = len(previous_df)
+
+    current_average_sentiment = (
+        float(current_df["sentiment_score"].mean()) if current_volume else 0.0
+    )
+    previous_average_sentiment = (
+        float(previous_df["sentiment_score"].mean()) if previous_volume else 0.0
+    )
+
+    current_positive = (
+        int((current_df["sentiment_category"] == "Positive").sum())
+        if current_volume
+        else 0
+    )
+    previous_positive = (
+        int((previous_df["sentiment_category"] == "Positive").sum())
+        if previous_volume
+        else 0
+    )
+
+    current_negative = (
+        int((current_df["sentiment_category"] == "Negative").sum())
+        if current_volume
+        else 0
+    )
+    previous_negative = (
+        int((previous_df["sentiment_category"] == "Negative").sum())
+        if previous_volume
+        else 0
+    )
+
+    current_high_priority = (
+        int(current_df["alert_level"].isin(["High", "Critical"]).sum())
+        if current_volume
+        else 0
+    )
+    previous_high_priority = (
+        int(previous_df["alert_level"].isin(["High", "Critical"]).sum())
+        if previous_volume
+        else 0
+    )
+
+    current_unique_outlets = (
+        int(current_df["outlet_platform"].nunique()) if current_volume else 0
+    )
+    previous_unique_outlets = (
+        int(previous_df["outlet_platform"].nunique()) if previous_volume else 0
+    )
+
+    weekday_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    current_dates = [
+        current_start + timedelta(days=offset) for offset in range(7)
+    ]
+    previous_dates = [
+        previous_start + timedelta(days=offset) for offset in range(7)
+    ]
+
+    current_daily_counts = (
+        current_df.groupby("insert_date").size().to_dict()
+        if current_volume
+        else {}
+    )
+    previous_daily_counts = (
+        previous_df.groupby("insert_date").size().to_dict()
+        if previous_volume
+        else {}
+    )
+
+    volume_chart = pd.DataFrame(
+        {
+            "Day": weekday_labels,
+            "Selected week": [
+                int(current_daily_counts.get(day, 0)) for day in current_dates
+            ],
+            "Previous week": [
+                int(previous_daily_counts.get(day, 0)) for day in previous_dates
+            ],
+        }
+    ).set_index("Day")
+
+    sentiment_categories = ["Positive", "Neutral", "Negative", "Mixed", "Unknown"]
+    current_sentiment_counts = (
+        current_df["sentiment_category"].value_counts().to_dict()
+        if current_volume
+        else {}
+    )
+    previous_sentiment_counts = (
+        previous_df["sentiment_category"].value_counts().to_dict()
+        if previous_volume
+        else {}
+    )
+
+    sentiment_chart = pd.DataFrame(
+        {
+            "Sentiment": sentiment_categories,
+            "Selected week": [
+                int(current_sentiment_counts.get(category, 0))
+                for category in sentiment_categories
+            ],
+            "Previous week": [
+                int(previous_sentiment_counts.get(category, 0))
+                for category in sentiment_categories
+            ],
+        }
+    ).set_index("Sentiment")
+
+    current_keyword_counts = count_keyword_mentions(current_records, keyword_rows)
+    previous_keyword_counts = count_keyword_mentions(previous_records, keyword_rows)
+    keyword_rows_output = []
+
+    for term in sorted(
+        set(current_keyword_counts) | set(previous_keyword_counts),
+        key=lambda item: current_keyword_counts.get(item, 0),
+        reverse=True,
+    ):
+        current_count = current_keyword_counts.get(term, 0)
+        previous_count = previous_keyword_counts.get(term, 0)
+        percentage_change = calculate_percentage_change(
+            current_count,
+            previous_count,
+        )
+
+        if percentage_change is None:
+            change_label = "0.0%"
+        elif percentage_change == float("inf"):
+            change_label = "New"
+        else:
+            change_label = f"{percentage_change:+.1f}%"
+
+        keyword_rows_output.append(
+            {
+                "Keyword": term,
+                "Selected week": current_count,
+                "Previous week": previous_count,
+                "Change": current_count - previous_count,
+                "Change %": change_label,
+            }
+        )
+
+    keyword_table = pd.DataFrame(keyword_rows_output)
+    if not keyword_table.empty:
+        keyword_table = keyword_table.sort_values(
+            ["Selected week", "Change"],
+            ascending=[False, False],
+        )
+
+    outlet_chart = pd.DataFrame()
+    if current_volume or previous_volume:
+        current_outlets = (
+            current_df["outlet_platform"].value_counts()
+            if current_volume
+            else pd.Series(dtype=int)
+        )
+        previous_outlets = (
+            previous_df["outlet_platform"].value_counts()
+            if previous_volume
+            else pd.Series(dtype=int)
+        )
+        top_outlets = list(
+            (current_outlets.add(previous_outlets, fill_value=0))
+            .sort_values(ascending=False)
+            .head(10)
+            .index
+        )
+        outlet_chart = pd.DataFrame(
+            {
+                "Outlet": top_outlets,
+                "Selected week": [
+                    int(current_outlets.get(outlet, 0)) for outlet in top_outlets
+                ],
+                "Previous week": [
+                    int(previous_outlets.get(outlet, 0)) for outlet in top_outlets
+                ],
+            }
+        ).set_index("Outlet")
+
+    theme_chart = pd.DataFrame()
+    if current_volume or previous_volume:
+        current_themes = (
+            current_df["theme"].value_counts()
+            if current_volume
+            else pd.Series(dtype=int)
+        )
+        previous_themes = (
+            previous_df["theme"].value_counts()
+            if previous_volume
+            else pd.Series(dtype=int)
+        )
+        top_themes = list(
+            (current_themes.add(previous_themes, fill_value=0))
+            .sort_values(ascending=False)
+            .head(10)
+            .index
+        )
+        theme_chart = pd.DataFrame(
+            {
+                "Theme": top_themes,
+                "Selected week": [
+                    int(current_themes.get(theme, 0)) for theme in top_themes
+                ],
+                "Previous week": [
+                    int(previous_themes.get(theme, 0)) for theme in top_themes
+                ],
+            }
+        ).set_index("Theme")
+
+    detail_columns = [
+        "date_published",
+        "inserted_at",
+        "outlet_platform",
+        "title",
+        "theme",
+        "sentiment_category",
+        "sentiment_score",
+        "alert_level",
+        "recommendation",
+        "assigned_to_user",
+    ]
+    detail_table = (
+        current_df[detail_columns]
+        .sort_values("inserted_at", ascending=False)
+        .copy()
+        if current_volume
+        else pd.DataFrame(columns=detail_columns)
+    )
+
+    if not detail_table.empty:
+        detail_table["inserted_at"] = detail_table["inserted_at"].dt.strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        detail_table = detail_table.rename(
+            columns={
+                "date_published": "Published",
+                "inserted_at": "Inserted",
+                "outlet_platform": "Outlet",
+                "title": "Title",
+                "theme": "Theme",
+                "sentiment_category": "Sentiment",
+                "sentiment_score": "Score",
+                "alert_level": "Alert",
+                "recommendation": "Recommendation",
+                "assigned_to_user": "Assigned to",
+            }
+        )
+
+    metrics = {
+        "current_volume": current_volume,
+        "previous_volume": previous_volume,
+        "current_average_sentiment": current_average_sentiment,
+        "previous_average_sentiment": previous_average_sentiment,
+        "current_positive": current_positive,
+        "previous_positive": previous_positive,
+        "current_negative": current_negative,
+        "previous_negative": previous_negative,
+        "current_high_priority": current_high_priority,
+        "previous_high_priority": previous_high_priority,
+        "current_unique_outlets": current_unique_outlets,
+        "previous_unique_outlets": previous_unique_outlets,
+        "volume_change_percent": calculate_percentage_change(
+            current_volume,
+            previous_volume,
+        ),
+    }
+
+    return {
+        "current_period": (
+            f"{current_start.isoformat()} to {current_end.isoformat()}"
+        ),
+        "previous_period": (
+            f"{previous_start.isoformat()} to {previous_end.isoformat()}"
+        ),
+        "metrics": metrics,
+        "volume_chart": volume_chart.to_dict(),
+        "sentiment_chart": sentiment_chart.to_dict(),
+        "keyword_table": keyword_table.to_dict("records"),
+        "outlet_chart": outlet_chart.to_dict() if not outlet_chart.empty else {},
+        "theme_chart": theme_chart.to_dict() if not theme_chart.empty else {},
+        "detail_table": detail_table.to_dict("records"),
+    }
+
+
+def generate_weekly_quantitative_interpretation(package: dict) -> str:
+    """Use Gemini to interpret calculated metrics without recalculating them."""
+    instruction = """
+You are the senior media-monitoring analyst for AIA Canada.
+
+Interpret the supplied quantitative weekly report. The calculations have
+already been completed by the application.
+
+Rules:
+1. Use only the supplied metrics and tables.
+2. Do not recalculate, invent or estimate values.
+3. Compare the selected week with the previous week.
+4. Explicitly identify increases, decreases and unchanged measures.
+5. Treat low-volume samples cautiously and say when a trend may be unstable.
+6. Highlight sentiment movement, volume movement, keyword movement, outlet
+   concentration, themes and high-priority mentions.
+7. Use Canadian Press style.
+8. Provide exactly these sections:
+   ## Quantitative Executive Summary
+   ## Material Week-over-Week Changes
+   ## Emerging Topics and Keywords
+   ## Risks and Recommended Actions
+9. Keep the analysis concise and suitable for executives.
+"""
+
+    response = ai_client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=json.dumps(package, default=str),
+        config=types.GenerateContentConfig(system_instruction=instruction),
+    )
+    return response.text
+
+
+def render_weekly_quantitative_report(package: dict) -> None:
+    """Render a persistent quantitative weekly dashboard with explicit charts."""
+    metrics = package["metrics"]
+
+    st.markdown("### Quantitative Executive Dashboard")
+    st.caption(
+        f"Selected week: {package['current_period']} | "
+        f"Comparison week: {package['previous_period']}"
+    )
+
+    metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
+
+    with metric_col1:
+        st.metric(
+            "Mention volume",
+            metrics["current_volume"],
+            format_metric_delta(
+                metrics["current_volume"],
+                metrics["previous_volume"],
+            ),
+        )
+
+    with metric_col2:
+        st.metric(
+            "Average sentiment",
+            f"{metrics['current_average_sentiment']:.2f}",
+            format_metric_delta(
+                metrics["current_average_sentiment"],
+                metrics["previous_average_sentiment"],
+            ),
+        )
+
+    with metric_col3:
+        st.metric(
+            "Positive mentions",
+            metrics["current_positive"],
+            format_metric_delta(
+                metrics["current_positive"],
+                metrics["previous_positive"],
+            ),
+        )
+
+    with metric_col4:
+        st.metric(
+            "Negative mentions",
+            metrics["current_negative"],
+            format_metric_delta(
+                metrics["current_negative"],
+                metrics["previous_negative"],
+            ),
+            delta_color="inverse",
+        )
+
+    with metric_col5:
+        st.metric(
+            "High/Critical",
+            metrics["current_high_priority"],
+            format_metric_delta(
+                metrics["current_high_priority"],
+                metrics["previous_high_priority"],
+            ),
+            delta_color="inverse",
+        )
+
+    volume_df = pd.DataFrame(package.get("volume_chart") or {})
+    sentiment_df = pd.DataFrame(package.get("sentiment_chart") or {})
+    theme_df = pd.DataFrame(package.get("theme_chart") or {})
+    outlet_df = pd.DataFrame(package.get("outlet_chart") or {})
+    keyword_df = pd.DataFrame(package.get("keyword_table") or [])
+
+    volume_col, sentiment_col = st.columns(2)
+
+    with volume_col:
+        st.markdown("#### Daily Mention Volume")
+        if volume_df.empty:
+            st.info("No daily volume data is available.")
+        else:
+            volume_plot = (
+                volume_df.rename_axis("Day")
+                .reset_index()
+                .melt(
+                    id_vars="Day",
+                    value_vars=["Selected week", "Previous week"],
+                    var_name="Period",
+                    value_name="Mentions",
+                )
+            )
+            st.vega_lite_chart(
+                volume_plot,
+                {
+                    "mark": {"type": "line", "point": True},
+                    "encoding": {
+                        "x": {
+                            "field": "Day",
+                            "type": "ordinal",
+                            "sort": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                            "title": "Day",
+                        },
+                        "y": {
+                            "field": "Mentions",
+                            "type": "quantitative",
+                            "title": "Mention count",
+                        },
+                        "color": {
+                            "field": "Period",
+                            "type": "nominal",
+                            "title": "Period",
+                        },
+                        "tooltip": [
+                            {"field": "Day", "type": "ordinal"},
+                            {"field": "Period", "type": "nominal"},
+                            {"field": "Mentions", "type": "quantitative"},
+                        ],
+                    },
+                },
+                use_container_width=True,
+            )
+
+    with sentiment_col:
+        st.markdown("#### Sentiment Distribution")
+        if sentiment_df.empty:
+            st.info("No sentiment data is available.")
+        else:
+            sentiment_plot = (
+                sentiment_df.rename_axis("Sentiment")
+                .reset_index()
+                .melt(
+                    id_vars="Sentiment",
+                    value_vars=["Selected week", "Previous week"],
+                    var_name="Period",
+                    value_name="Mentions",
+                )
+            )
+            st.vega_lite_chart(
+                sentiment_plot,
+                {
+                    "mark": "bar",
+                    "encoding": {
+                        "x": {
+                            "field": "Sentiment",
+                            "type": "nominal",
+                            "title": "Sentiment",
+                        },
+                        "y": {
+                            "field": "Mentions",
+                            "type": "quantitative",
+                            "title": "Mention count",
+                        },
+                        "xOffset": {"field": "Period"},
+                        "color": {
+                            "field": "Period",
+                            "type": "nominal",
+                            "title": "Period",
+                        },
+                        "tooltip": [
+                            {"field": "Sentiment", "type": "nominal"},
+                            {"field": "Period", "type": "nominal"},
+                            {"field": "Mentions", "type": "quantitative"},
+                        ],
+                    },
+                },
+                use_container_width=True,
+            )
+
+    keyword_col, theme_col = st.columns(2)
+
+    with keyword_col:
+        st.markdown("#### Keyword Mention Trends")
+        if keyword_df.empty:
+            st.info("No configured monitoring keywords matched either week.")
+        else:
+            keyword_plot = keyword_df.head(15).melt(
+                id_vars="Keyword",
+                value_vars=["Selected week", "Previous week"],
+                var_name="Period",
+                value_name="Mentions",
+            )
+            st.vega_lite_chart(
+                keyword_plot,
+                {
+                    "mark": "bar",
+                    "encoding": {
+                        "y": {
+                            "field": "Keyword",
+                            "type": "nominal",
+                            "sort": "-x",
+                            "title": "Keyword",
+                        },
+                        "x": {
+                            "field": "Mentions",
+                            "type": "quantitative",
+                            "title": "Mention count",
+                        },
+                        "yOffset": {"field": "Period"},
+                        "color": {
+                            "field": "Period",
+                            "type": "nominal",
+                            "title": "Period",
+                        },
+                        "tooltip": [
+                            {"field": "Keyword", "type": "nominal"},
+                            {"field": "Period", "type": "nominal"},
+                            {"field": "Mentions", "type": "quantitative"},
+                        ],
+                    },
+                },
+                use_container_width=True,
+            )
+            with st.expander("View keyword comparison table"):
+                st.dataframe(keyword_df, use_container_width=True, hide_index=True)
+
+    with theme_col:
+        st.markdown("#### Theme Volume")
+        if theme_df.empty:
+            st.info("No theme data is available.")
+        else:
+            theme_plot = (
+                theme_df.rename_axis("Theme")
+                .reset_index()
+                .melt(
+                    id_vars="Theme",
+                    value_vars=["Selected week", "Previous week"],
+                    var_name="Period",
+                    value_name="Mentions",
+                )
+            )
+            st.vega_lite_chart(
+                theme_plot,
+                {
+                    "mark": "bar",
+                    "encoding": {
+                        "y": {
+                            "field": "Theme",
+                            "type": "nominal",
+                            "sort": "-x",
+                            "title": "Theme",
+                        },
+                        "x": {
+                            "field": "Mentions",
+                            "type": "quantitative",
+                            "title": "Mention count",
+                        },
+                        "yOffset": {"field": "Period"},
+                        "color": {
+                            "field": "Period",
+                            "type": "nominal",
+                            "title": "Period",
+                        },
+                        "tooltip": [
+                            {"field": "Theme", "type": "nominal"},
+                            {"field": "Period", "type": "nominal"},
+                            {"field": "Mentions", "type": "quantitative"},
+                        ],
+                    },
+                },
+                use_container_width=True,
+            )
+
+    st.markdown("#### Top Outlet Volume")
+    if outlet_df.empty:
+        st.info("No outlet data is available.")
+    else:
+        outlet_plot = (
+            outlet_df.rename_axis("Outlet")
+            .reset_index()
+            .melt(
+                id_vars="Outlet",
+                value_vars=["Selected week", "Previous week"],
+                var_name="Period",
+                value_name="Mentions",
+            )
+        )
+        st.vega_lite_chart(
+            outlet_plot,
+            {
+                "mark": "bar",
+                "encoding": {
+                    "y": {
+                        "field": "Outlet",
+                        "type": "nominal",
+                        "sort": "-x",
+                        "title": "Outlet",
+                    },
+                    "x": {
+                        "field": "Mentions",
+                        "type": "quantitative",
+                        "title": "Mention count",
+                    },
+                    "yOffset": {"field": "Period"},
+                    "color": {
+                        "field": "Period",
+                        "type": "nominal",
+                        "title": "Period",
+                    },
+                    "tooltip": [
+                        {"field": "Outlet", "type": "nominal"},
+                        {"field": "Period", "type": "nominal"},
+                        {"field": "Mentions", "type": "quantitative"},
+                    ],
+                },
+            },
+            use_container_width=True,
+        )
+
+    st.markdown("#### Gemini Interpretation")
+    st.markdown(package.get("ai_interpretation") or "No interpretation available.")
+
+    with st.expander("View mentions used in the selected week"):
+        detail_df = pd.DataFrame(package.get("detail_table") or [])
+        if detail_df.empty:
+            st.info("No reportable mentions were available.")
+        else:
+            st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+
+
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
 st.sidebar.title("📊 AIA Canada Monitor")
 st.sidebar.caption(f"Operator: {st.session_state['user_full_name']} ({USER_ROLE})")
@@ -1506,137 +2273,81 @@ Mandatory requirements:
 
     # --- WEEKLY REPORT TAB ---
     with tab_weekly:
-        st.markdown("### Generate Weekly Trend Analysis")
+        st.markdown("### Weekly Quantitative Trend Report")
         st.write(
-            "Select a week-ending date. The report analyzes mentions inserted "
-            "during the seven-day period ending on that date."
+            "Compare a selected seven-day period with the immediately preceding "
+            "seven days. Metrics are calculated directly from the mentions database."
         )
 
         weekly_end_date = st.date_input(
             "Select Week Ending Date",
             value=datetime.now().date(),
-            key="weekly_trend_end_date",
+            key="weekly_quantitative_end_date",
         )
         weekly_start_date = weekly_end_date - timedelta(days=6)
+        previous_end_date = weekly_start_date - timedelta(days=1)
+        previous_start_date = previous_end_date - timedelta(days=6)
 
         st.caption(
-            f"Reporting period: {weekly_start_date.isoformat()} through "
-            f"{weekly_end_date.isoformat()} (based on database insertion date)."
+            f"Selected week: {weekly_start_date.isoformat()} through "
+            f"{weekly_end_date.isoformat()} | Previous week: "
+            f"{previous_start_date.isoformat()} through "
+            f"{previous_end_date.isoformat()}."
         )
 
-        try:
-            tmpl_res = (
-                supabase.table("monitor_templates")
-                .select("*")
-                .eq("template_name", "Weekly Trend Summary")
-                .execute()
-            )
-            weekly_instruction = tmpl_res.data[0]["system_instruction_prompt"]
-        except Exception:
-            weekly_instruction = (
-                "You are the senior media monitoring AI analyst for AIA Canada. "
-                "Draft a factual weekly trend summary using Canadian Press style."
-            )
-
         if st.button(
-            "Generate Weekly Trend Document",
+            "Generate Quantitative Weekly Report",
             use_container_width=True,
             type="primary",
-            key="generate_weekly_trend_document",
+            key="generate_quantitative_weekly_report",
         ):
-            st.session_state.pop("latest_weekly_report", None)
+            st.session_state.pop("weekly_quantitative_package", None)
 
-            with st.spinner("Compiling records inserted during the selected week..."):
-                start_iso = datetime.combine(
-                    weekly_start_date,
-                    datetime.min.time(),
-                ).isoformat()
-                end_iso = datetime.combine(
-                    weekly_end_date,
-                    datetime.max.time(),
-                ).isoformat()
-
-                raw_data = (
-                    supabase.table("mentions")
-                    .select(
-                        "id, title, url, outlet_platform, theme, status, "
-                        "recommendation, brands_affected, alert_level, "
-                        "assigned_to_user, date_published, inserted_at, "
-                        "sentiment_category, sentiment_score, "
-                        "naming_error_flag, data_conflict_flag, "
-                        "data_conflict_details, ai_action_recommendation"
+            try:
+                with st.spinner("Calculating week-over-week media trends..."):
+                    current_records = fetch_reportable_mentions(
+                        weekly_start_date,
+                        weekly_end_date,
                     )
-                    .gte("inserted_at", start_iso)
-                    .lte("inserted_at", end_iso)
-                    .neq("status", "noise")
-                    .neq("recommendation", "ignore")
-                    .order("inserted_at", desc=True)
-                    .execute()
-                )
-
-                weekly_records = [
-                    record
-                    for record in (raw_data.data or [])
-                    if str(record.get("status") or "").lower() != "noise"
-                    and str(record.get("recommendation") or "").lower() != "ignore"
-                ]
-
-                if not weekly_records:
-                    st.warning(
-                        "No reportable mentions were inserted during the selected week."
+                    previous_records = fetch_reportable_mentions(
+                        previous_start_date,
+                        previous_end_date,
                     )
-                else:
-                    try:
-                        reporting_instruction = (
-                            f"{weekly_instruction}\n\n"
-                            "MANDATORY REPORTING SCOPE:\n"
-                            f"- Analyze only records inserted from "
-                            f"{weekly_start_date.isoformat()} through "
-                            f"{weekly_end_date.isoformat()}.\n"
-                            "- Use inserted_at to define the reporting period.\n"
-                            "- date_published is contextual information only.\n"
-                            "- Do not include records marked as noise or ignore.\n"
-                            "- Ground every finding strictly in the supplied records.\n"
-                            "- Include the exact sections required by the saved Weekly "
-                            "Trend Summary template."
+                    keyword_rows = load_monitoring_keywords()
+
+                    if not current_records and not previous_records:
+                        st.warning(
+                            "No reportable mentions were inserted during either "
+                            "comparison period."
+                        )
+                    else:
+                        package = build_weekly_quantitative_package(
+                            current_records=current_records,
+                            previous_records=previous_records,
+                            keyword_rows=keyword_rows,
+                            current_start=weekly_start_date,
+                            current_end=weekly_end_date,
+                            previous_start=previous_start_date,
+                            previous_end=previous_end_date,
                         )
 
-                        response = ai_client.models.generate_content(
-                            model="gemini-2.5-flash",
-                            contents=[
-                                (
-                                    f"Weekly reporting period: "
-                                    f"{weekly_start_date.isoformat()} to "
-                                    f"{weekly_end_date.isoformat()}\n\n"
-                                    f"Records inserted during this period:\n"
-                                    f"{weekly_records}"
-                                )
-                            ],
-                            config=types.GenerateContentConfig(
-                                system_instruction=reporting_instruction
-                            ),
+                        package["ai_interpretation"] = (
+                            generate_weekly_quantitative_interpretation(package)
                         )
-
-                        st.session_state["latest_weekly_report"] = response.text
-                        st.session_state["latest_weekly_report_period"] = (
-                            f"{weekly_start_date.isoformat()} to "
-                            f"{weekly_end_date.isoformat()}"
-                        )
+                        st.session_state["weekly_quantitative_package"] = package
                         st.success(
-                            f"Weekly Trend Summary generated from "
-                            f"{len(weekly_records)} mention(s)."
+                            "Quantitative weekly report generated from "
+                            f"{len(current_records)} selected-week mention(s) and "
+                            f"{len(previous_records)} previous-week mention(s)."
                         )
-                    except Exception as e:
-                        st.error(f"Generation failed: {e}")
+            except Exception as exc:
+                st.error(f"Weekly quantitative report failed: {exc}")
 
-        if "latest_weekly_report" in st.session_state:
+        if "weekly_quantitative_package" in st.session_state:
             st.markdown("---")
-            report_period = st.session_state.get(
-                "latest_weekly_report_period",
-                "Selected reporting period",
+            render_weekly_quantitative_report(
+                st.session_state["weekly_quantitative_package"]
             )
-            st.caption(f"Report period: {report_period}")
-            st.markdown(st.session_state["latest_weekly_report"])
 
 # --- MODULE 5: DATABASE Q&A ASSISTANT ---
 elif app_mode == "💬 Ask AIA Media":
