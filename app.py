@@ -8,6 +8,20 @@ import json
 from datetime import datetime, timedelta, time as datetime_time
 from typing import Any
 from urllib.parse import quote
+from io import BytesIO
+from xml.sax.saxutils import escape
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import landscape, letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
+)
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.lineplots import LinePlot
+from reportlab.graphics.charts.barcharts import VerticalBarChart, HorizontalBarChart
+from reportlab.graphics.widgets.markers import makeMarker
 from supabase import create_client, Client
 from google import genai
 from google.genai import types
@@ -1485,6 +1499,547 @@ def render_weekly_quantitative_report(package: dict) -> None:
 
 
 
+def _pdf_safe(value) -> str:
+    """Convert a value to escaped text suitable for ReportLab paragraphs."""
+    if value is None:
+        return ""
+    return escape(str(value))
+
+
+def _make_line_chart(
+    chart_df: pd.DataFrame,
+    title: str,
+    width: float = 7.2 * inch,
+    height: float = 3.0 * inch,
+) -> Drawing:
+    """Build a two-series line chart for the PDF report."""
+    drawing = Drawing(width, height)
+    drawing.add(
+        Paragraph(
+            _pdf_safe(title),
+            ParagraphStyle(
+                "ChartTitle",
+                parent=getSampleStyleSheet()["Heading3"],
+                alignment=TA_CENTER,
+                fontSize=11,
+                leading=13,
+            ),
+        )
+    )
+
+    if chart_df.empty:
+        return drawing
+
+    selected = [float(value) for value in chart_df["Selected week"].tolist()]
+    previous = [float(value) for value in chart_df["Previous week"].tolist()]
+    points_selected = list(enumerate(selected))
+    points_previous = list(enumerate(previous))
+
+    chart = LinePlot()
+    chart.x = 55
+    chart.y = 35
+    chart.width = width - 85
+    chart.height = height - 75
+    chart.data = [points_selected, points_previous]
+    chart.lines[0].strokeColor = colors.HexColor("#1f77b4")
+    chart.lines[0].strokeWidth = 2
+    chart.lines[0].symbol = makeMarker("Circle")
+    chart.lines[1].strokeColor = colors.HexColor("#7f7f7f")
+    chart.lines[1].strokeWidth = 2
+    chart.lines[1].symbol = makeMarker("Square")
+    chart.xValueAxis.valueMin = 0
+    chart.xValueAxis.valueMax = max(len(chart_df.index) - 1, 1)
+    chart.xValueAxis.valueSteps = list(range(len(chart_df.index)))
+    chart.xValueAxis.labelTextFormat = lambda value: str(chart_df.index[int(value)]) if int(value) < len(chart_df.index) else ""
+    chart.yValueAxis.valueMin = 0
+    max_value = max(selected + previous + [1])
+    chart.yValueAxis.valueMax = max_value + max(1, max_value * 0.15)
+    chart.yValueAxis.valueStep = max(1, round(chart.yValueAxis.valueMax / 5))
+    drawing.add(chart)
+    return drawing
+
+
+def _make_vertical_bar_chart(
+    chart_df: pd.DataFrame,
+    title: str,
+    width: float = 7.2 * inch,
+    height: float = 3.2 * inch,
+) -> Drawing:
+    """Build a grouped vertical bar chart for the PDF report."""
+    drawing = Drawing(width, height)
+    if chart_df.empty:
+        return drawing
+
+    chart = VerticalBarChart()
+    chart.x = 55
+    chart.y = 45
+    chart.width = width - 85
+    chart.height = height - 85
+    chart.data = [
+        [float(value) for value in chart_df["Selected week"].tolist()],
+        [float(value) for value in chart_df["Previous week"].tolist()],
+    ]
+    chart.categoryAxis.categoryNames = [str(value)[:18] for value in chart_df.index]
+    chart.categoryAxis.labels.angle = 20
+    chart.categoryAxis.labels.dy = -12
+    chart.categoryAxis.labels.fontSize = 7
+    chart.valueAxis.valueMin = 0
+    max_value = max(chart.data[0] + chart.data[1] + [1])
+    chart.valueAxis.valueMax = max_value + max(1, max_value * 0.15)
+    chart.valueAxis.valueStep = max(1, round(chart.valueAxis.valueMax / 5))
+    chart.bars[0].fillColor = colors.HexColor("#1f77b4")
+    chart.bars[1].fillColor = colors.HexColor("#7f7f7f")
+    drawing.add(chart)
+
+    styles = getSampleStyleSheet()
+    drawing.add(
+        Paragraph(
+            _pdf_safe(title),
+            ParagraphStyle(
+                "BarTitle",
+                parent=styles["Heading3"],
+                alignment=TA_CENTER,
+                fontSize=11,
+                leading=13,
+            ),
+        )
+    )
+    return drawing
+
+
+def _make_horizontal_bar_chart(
+    chart_df: pd.DataFrame,
+    title: str,
+    label_column: str,
+    width: float = 7.2 * inch,
+    height: float = 4.2 * inch,
+) -> Drawing:
+    """Build a grouped horizontal bar chart for the PDF report."""
+    drawing = Drawing(width, height)
+    if chart_df.empty:
+        return drawing
+
+    limited_df = chart_df.head(12).copy()
+    labels = [str(value)[:36] for value in limited_df[label_column].tolist()]
+    chart = HorizontalBarChart()
+    chart.x = 140
+    chart.y = 35
+    chart.width = width - 175
+    chart.height = height - 80
+    chart.data = [
+        [float(value) for value in limited_df["Selected week"].tolist()],
+        [float(value) for value in limited_df["Previous week"].tolist()],
+    ]
+    chart.categoryAxis.categoryNames = labels
+    chart.categoryAxis.labels.fontSize = 7
+    chart.valueAxis.valueMin = 0
+    max_value = max(chart.data[0] + chart.data[1] + [1])
+    chart.valueAxis.valueMax = max_value + max(1, max_value * 0.15)
+    chart.valueAxis.valueStep = max(1, round(chart.valueAxis.valueMax / 5))
+    chart.bars[0].fillColor = colors.HexColor("#1f77b4")
+    chart.bars[1].fillColor = colors.HexColor("#7f7f7f")
+    drawing.add(chart)
+
+    styles = getSampleStyleSheet()
+    drawing.add(
+        Paragraph(
+            _pdf_safe(title),
+            ParagraphStyle(
+                "HorizontalBarTitle",
+                parent=styles["Heading3"],
+                alignment=TA_CENTER,
+                fontSize=11,
+                leading=13,
+            ),
+        )
+    )
+    return drawing
+
+
+def build_weekly_trend_pdf(package: dict) -> bytes:
+    """Create a portable PDF version of the quantitative weekly report."""
+    buffer = BytesIO()
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(letter),
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36,
+        title="AIA Canada Weekly Quantitative Trend Report",
+        author="AIA Canada Media Monitor",
+    )
+
+    styles = getSampleStyleSheet()
+    styles.add(
+        ParagraphStyle(
+            name="ReportTitle",
+            parent=styles["Title"],
+            fontSize=20,
+            leading=24,
+            spaceAfter=12,
+            alignment=TA_CENTER,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="ReportSubtitle",
+            parent=styles["Normal"],
+            fontSize=9,
+            leading=12,
+            textColor=colors.HexColor("#555555"),
+            alignment=TA_CENTER,
+            spaceAfter=16,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="SmallBody",
+            parent=styles["BodyText"],
+            fontSize=8,
+            leading=10,
+        )
+    )
+
+    story = [
+        Paragraph("AIA Canada Weekly Quantitative Trend Report", styles["ReportTitle"]),
+        Paragraph(
+            f"Selected week: {_pdf_safe(package.get('current_period'))} &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"Comparison week: {_pdf_safe(package.get('previous_period'))}",
+            styles["ReportSubtitle"],
+        ),
+    ]
+
+    metrics = package.get("metrics") or {}
+    metric_rows = [
+        ["Metric", "Selected week", "Previous week", "Change"],
+        [
+            "Mention volume",
+            metrics.get("current_volume", 0),
+            metrics.get("previous_volume", 0),
+            format_metric_delta(metrics.get("current_volume", 0), metrics.get("previous_volume", 0)),
+        ],
+        [
+            "Average sentiment",
+            f"{metrics.get('current_average_sentiment', 0):.2f}",
+            f"{metrics.get('previous_average_sentiment', 0):.2f}",
+            format_metric_delta(
+                metrics.get("current_average_sentiment", 0),
+                metrics.get("previous_average_sentiment", 0),
+            ),
+        ],
+        [
+            "Positive mentions",
+            metrics.get("current_positive", 0),
+            metrics.get("previous_positive", 0),
+            format_metric_delta(metrics.get("current_positive", 0), metrics.get("previous_positive", 0)),
+        ],
+        [
+            "Negative mentions",
+            metrics.get("current_negative", 0),
+            metrics.get("previous_negative", 0),
+            format_metric_delta(metrics.get("current_negative", 0), metrics.get("previous_negative", 0)),
+        ],
+        [
+            "High/Critical",
+            metrics.get("current_high_priority", 0),
+            metrics.get("previous_high_priority", 0),
+            format_metric_delta(
+                metrics.get("current_high_priority", 0),
+                metrics.get("previous_high_priority", 0),
+            ),
+        ],
+        [
+            "Unique outlets",
+            metrics.get("current_unique_outlets", 0),
+            metrics.get("previous_unique_outlets", 0),
+            format_metric_delta(
+                metrics.get("current_unique_outlets", 0),
+                metrics.get("previous_unique_outlets", 0),
+            ),
+        ],
+    ]
+    metric_table = Table(metric_rows, colWidths=[2.2 * inch, 1.4 * inch, 1.4 * inch, 1.6 * inch], repeatRows=1)
+    metric_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f4e78")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#bbbbbb")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f6f8")]),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 7),
+                ("TOPPADDING", (0, 0), (-1, 0), 7),
+            ]
+        )
+    )
+    story.extend([Paragraph("Executive Metrics", styles["Heading2"]), metric_table, Spacer(1, 16)])
+
+    interpretation = package.get("ai_interpretation") or "No interpretation available."
+    for raw_line in str(interpretation).splitlines():
+        line = raw_line.strip()
+        if not line:
+            story.append(Spacer(1, 5))
+        elif line.startswith("## "):
+            story.append(Paragraph(_pdf_safe(line[3:]), styles["Heading2"]))
+        elif line.startswith("- "):
+            story.append(Paragraph(f"• {_pdf_safe(line[2:])}", styles["BodyText"]))
+        else:
+            story.append(Paragraph(_pdf_safe(line), styles["BodyText"]))
+
+    story.append(PageBreak())
+
+    volume_df = pd.DataFrame(package.get("volume_chart") or {})
+    sentiment_df = pd.DataFrame(package.get("sentiment_chart") or {})
+    keyword_df = pd.DataFrame(package.get("keyword_table") or [])
+    theme_df = pd.DataFrame(package.get("theme_chart") or {})
+    outlet_df = pd.DataFrame(package.get("outlet_chart") or {})
+
+    story.extend(
+        [
+            Paragraph("Charts and Trend Comparisons", styles["Heading1"]),
+            _make_line_chart(volume_df, "Daily Mention Volume"),
+            Spacer(1, 12),
+            _make_vertical_bar_chart(sentiment_df, "Sentiment Distribution"),
+            PageBreak(),
+        ]
+    )
+
+    if not keyword_df.empty:
+        story.extend(
+            [
+                _make_horizontal_bar_chart(
+                    keyword_df.sort_values("Selected week", ascending=False),
+                    "Keyword Mention Trends",
+                    "Keyword",
+                ),
+                Spacer(1, 12),
+            ]
+        )
+
+    if not theme_df.empty:
+        theme_pdf_df = theme_df.rename_axis("Theme").reset_index()
+        story.extend(
+            [
+                _make_horizontal_bar_chart(
+                    theme_pdf_df.sort_values("Selected week", ascending=False),
+                    "Theme Volume",
+                    "Theme",
+                ),
+                PageBreak(),
+            ]
+        )
+
+    if not outlet_df.empty:
+        outlet_pdf_df = outlet_df.rename_axis("Outlet").reset_index()
+        story.extend(
+            [
+                _make_horizontal_bar_chart(
+                    outlet_pdf_df.sort_values("Selected week", ascending=False),
+                    "Top Outlet Volume",
+                    "Outlet",
+                ),
+                Spacer(1, 12),
+            ]
+        )
+
+    detail_df = pd.DataFrame(package.get("detail_table") or [])
+    if not detail_df.empty:
+        story.append(Paragraph("Selected-Week Mention Detail", styles["Heading1"]))
+        display_columns = [
+            column
+            for column in [
+                "Published",
+                "Outlet",
+                "Title",
+                "Theme",
+                "Sentiment",
+                "Score",
+                "Alert",
+                "Recommendation",
+                "Assigned to",
+            ]
+            if column in detail_df.columns
+        ]
+        detail_df = detail_df[display_columns].fillna("")
+        detail_rows = [
+            [Paragraph(_pdf_safe(column), styles["SmallBody"]) for column in display_columns]
+        ]
+        for _, row in detail_df.iterrows():
+            detail_rows.append(
+                [
+                    Paragraph(_pdf_safe(row[column]), styles["SmallBody"])
+                    for column in display_columns
+                ]
+            )
+
+        available_width = 10.0 * inch
+        widths = []
+        for column in display_columns:
+            if column == "Title":
+                widths.append(2.6 * inch)
+            elif column in {"Outlet", "Theme", "Assigned to"}:
+                widths.append(1.25 * inch)
+            else:
+                widths.append(0.9 * inch)
+        scale = available_width / sum(widths)
+        widths = [width * scale for width in widths]
+
+        detail_table = Table(detail_rows, colWidths=widths, repeatRows=1)
+        detail_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f4e78")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cccccc")),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
+        story.append(detail_table)
+
+    def add_page_number(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#666666"))
+        canvas.drawString(36, 20, "AIA Canada Media Monitor")
+        canvas.drawRightString(landscape(letter)[0] - 36, 20, f"Page {doc.page}")
+        canvas.restoreState()
+
+    document.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
+    return buffer.getvalue()
+
+
+def build_weekly_report_mailto(
+    package: dict,
+    recipients: list[str],
+    additional_message: str = "",
+) -> str:
+    """Build an Outlook-ready email draft for a weekly PDF report."""
+    clean_recipients = []
+    seen = set()
+    for email in recipients:
+        email = str(email or "").strip()
+        if not email or email.lower() in seen:
+            continue
+        seen.add(email.lower())
+        clean_recipients.append(email)
+
+    metrics = package.get("metrics") or {}
+    subject = f"AIA Canada Weekly Media Trend Report — {package.get('current_period', '')}"
+    standard_message = (
+        additional_message.strip()
+        or "Hello,\n\nPlease find attached the AIA Canada Weekly Quantitative Media Trend Report."
+    )
+    body = (
+        f"{standard_message}\n\n"
+        f"Reporting period: {package.get('current_period', '')}\n"
+        f"Comparison period: {package.get('previous_period', '')}\n"
+        f"Mention volume: {metrics.get('current_volume', 0)}\n"
+        f"Average sentiment: {metrics.get('current_average_sentiment', 0):.2f}\n"
+        f"High/Critical mentions: {metrics.get('current_high_priority', 0)}\n\n"
+        "The PDF must be downloaded from the Media Monitor and attached to this draft before sending.\n\n"
+        "Regards,\nAIA Canada"
+    )
+    recipient_string = ",".join(clean_recipients)
+    return (
+        f"mailto:{quote(recipient_string, safe='@,')}"
+        f"?subject={quote(subject)}"
+        f"&body={quote(body)}"
+    )
+
+
+def render_weekly_pdf_share_controls(package: dict) -> None:
+    """Render PDF download and Outlook draft controls for the weekly report."""
+    st.markdown("---")
+    st.markdown("### 📄 Export and Share")
+
+    pdf_bytes = st.session_state.get("weekly_quantitative_pdf")
+    if not pdf_bytes:
+        try:
+            pdf_bytes = build_weekly_trend_pdf(package)
+            st.session_state["weekly_quantitative_pdf"] = pdf_bytes
+        except Exception as exc:
+            st.error(f"Unable to generate the weekly PDF: {exc}")
+            return
+
+    current_period = str(package.get("current_period") or "weekly-report")
+    safe_period = re.sub(r"[^0-9A-Za-z_-]+", "_", current_period)
+    filename = f"AIA_Canada_Weekly_Media_Trend_{safe_period}.pdf"
+
+    st.download_button(
+        "Download Weekly Trend PDF",
+        data=pdf_bytes,
+        file_name=filename,
+        mime="application/pdf",
+        use_container_width=True,
+        key="download_weekly_trend_pdf",
+    )
+
+    registered_recipients = load_registered_email_recipients()
+    recipient_map = {
+        recipient["label"]: recipient["email"]
+        for recipient in registered_recipients
+    }
+    selected_labels = st.multiselect(
+        "Select registered recipients",
+        options=list(recipient_map.keys()),
+        key="weekly_report_email_recipients",
+        placeholder="Select SLT members or other registered users",
+    )
+    additional_addresses = st.text_input(
+        "Additional email addresses",
+        key="weekly_report_additional_recipients",
+        placeholder="external@example.com, another@example.com",
+        help="Separate multiple addresses with commas or semicolons.",
+    )
+    standard_message = st.text_area(
+        "Email message",
+        value=(
+            "Hello,\n\n"
+            "Please find attached the AIA Canada Weekly Quantitative Media Trend Report "
+            "for your review."
+        ),
+        height=110,
+        key="weekly_report_email_message",
+    )
+
+    selected_emails = [recipient_map[label] for label in selected_labels]
+    extra_emails = [
+        email.strip()
+        for email in additional_addresses.replace(";", ",").split(",")
+        if email.strip()
+    ]
+    all_emails = selected_emails + extra_emails
+
+    if all_emails:
+        outlook_url = build_weekly_report_mailto(
+            package=package,
+            recipients=all_emails,
+            additional_message=standard_message,
+        )
+        st.link_button(
+            "Open Outlook Draft",
+            outlook_url,
+            use_container_width=True,
+        )
+    else:
+        st.caption("Select at least one recipient to enable the Outlook draft button.")
+
+    st.info(
+        "Browser email links cannot attach local files automatically. "
+        "Download the PDF first, open the Outlook draft, then attach the downloaded PDF. "
+        "Automatic attachment requires Microsoft Graph integration and organizational OAuth approval."
+    )
+
+
 # --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
 st.sidebar.title("📊 AIA Canada Monitor")
 st.sidebar.caption(f"Operator: {st.session_state['user_full_name']} ({USER_ROLE})")
@@ -2302,6 +2857,7 @@ Mandatory requirements:
             key="generate_quantitative_weekly_report",
         ):
             st.session_state.pop("weekly_quantitative_package", None)
+            st.session_state.pop("weekly_quantitative_pdf", None)
 
             try:
                 with st.spinner("Calculating week-over-week media trends..."):
@@ -2346,6 +2902,9 @@ Mandatory requirements:
         if "weekly_quantitative_package" in st.session_state:
             st.markdown("---")
             render_weekly_quantitative_report(
+                st.session_state["weekly_quantitative_package"]
+            )
+            render_weekly_pdf_share_controls(
                 st.session_state["weekly_quantitative_package"]
             )
 
