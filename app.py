@@ -785,13 +785,7 @@ if st.session_state["auth_role"] == "Client":
     client_h_ids = [h["id"] for h in client_horses]
 
     try:
-        appts_res = (
-            supabase.table("appointments")
-            .select("*")
-            .in_("horse_id", client_h_ids)
-            .order("appointment_date")
-            .execute()
-        )
+        appts_res = supabase.table("appointments").select("*").in_("horse_id", client_h_ids).order("appointment_date").execute()
         my_appts = appts_res.data if appts_res.data else []
     except Exception:
         my_appts = []
