@@ -949,42 +949,29 @@ if st.session_state["auth_role"] == "Client":
             st.error(f"Booking error: {e}")
 
   with c_tab3:
-    st.subheader("Visual Progress Gallery (Before & After Stance / Gait)")
-    if client_horses:
-      chosen_h_gal = st.selectbox(
-          "Select Animal for Media",
-          [h["name"] for h in client_horses],
-          key="client_gal_h",
-      )
-      h_gal_obj = next(h for h in client_horses if h["name"] == chosen_h_gal)
+        st.subheader("Visual Progress Gallery (Before & After Stance / Gait)")
+        if client_horses:
+            chosen_h_gal = st.selectbox("Select Animal for Media", [h["name"] for h in client_horses], key="client_gal_h")
+            h_gal_obj = next(h for h in client_horses if h["name"] == chosen_h_gal)
 
-      try:
-        m_res = (
-            supabase.table("horse_media_records")
-            .select("*")
-            .eq("horse_id", str(h_gal_obj["id"]))
-            .order("record_date", desc=True)
-            .execute()
-        )
-        h_media = m_res.data if m_res.data else []
-      except Exception:
-        h_media = []
+            try:
+                m_res = supabase.table("horse_media_records").select("*").eq("horse_id", str(h_gal_obj["id"])).order("record_date", desc=True).execute()
+                h_media = m_res.data if m_res.data else []
+            except Exception:
+                h_media = []
 
-      if h_media:
-        for m in h_media:
-          st.markdown(
-              f"**{m.get('caption', 'Clinical Scan')}** —"
-              f" `{m.get('stage_category')}` ({m.get('record_date')})"
-          )
-          if m.get("media_type") == "Image":
-            st.image(m.get("media_url"), use_container_width=True)
-          else:
-            st.markdown(f"🔗 [Watch Movement Video]({m.get('media_url')})")
-          st.divider()
-      else:
-        st.info("No photos or videos logged for this animal yet.")
-    else:
-      st.info("Please register a horse profile first.")
+            if h_media:
+                for m in h_media:
+                    st.markdown(f"**{m.get('caption', 'Clinical Scan')}** — `{m.get('stage_category')}` ({m.get('record_date')})")
+                    if m.get("media_type") == "Image":
+                        st.image(m.get("media_url"), use_container_width=True)
+                    else:
+                        st.markdown(f"🔗 [Watch Movement Video]({m.get('media_url')})")
+                    st.divider()
+            else:
+                st.info("No photos or videos logged for this animal yet.")
+        else:
+            st.info("Please register a horse profile first.")
 
   with c_tab4:
     st.subheader("Account Statements & Payment Submission")
