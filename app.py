@@ -794,8 +794,8 @@ if st.session_state["auth_role"] == "Client":
                     st.divider()
             else:
                 st.info("No photos or videos logged for this animal yet.")
-    else:
-        st.info("Please register a horse profile first.")
+        else:
+            st.info("Please register a horse profile first.")
 
     with c_tab4:
         st.subheader("Account Statements & Payment Submission")
