@@ -950,7 +950,9 @@ if st.session_state["auth_role"] == "Client":
                 [h["name"] for h in client_horses],
                 key="client_gal_h",
             )
-            h_gal_obj = next(h for h in client_horses if h["name"] == chosen_h_gal)
+            h_gal_obj = next(
+                h for h in client_horses if h["name"] == chosen_h_gal
+            )
 
             try:
                 m_res = (
@@ -973,7 +975,9 @@ if st.session_state["auth_role"] == "Client":
                     if m.get("media_type") == "Image":
                         st.image(m.get("media_url"), use_container_width=True)
                     else:
-                        st.markdown(f"🔗 [Watch Movement Video]({m.get('media_url')})")
+                        st.markdown(
+                            f"🔗 [Watch Movement Video]({m.get('media_url')})"
+                        )
                     st.divider()
             else:
                 st.info("No photos or videos logged for this animal yet.")
