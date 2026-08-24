@@ -1,3237 +1,4070 @@
-import datetime
-import hashlib
-import io
-import smtplib
-import urllib.parse
-from email.mime.application import MIMEApplication
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from fpdf import FPDF
-import pandas as pd
 import streamlit as st
-from supabase import Client, create_client
+import requests
+import pandas as pd
+import os
+import re
+import time
+import json
+from datetime import datetime, timedelta, time as datetime_time
+from typing import Any
+from urllib.parse import quote
+from io import BytesIO
+from xml.sax.saxutils import escape
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import landscape, letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
+)
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.lineplots import LinePlot
+from reportlab.graphics.charts.barcharts import VerticalBarChart, HorizontalBarChart
+from reportlab.graphics.widgets.markers import makeMarker
+from supabase import create_client, Client
+from google import genai
+from google.genai import types
 
-# ----------------------------------------------------
-# 1. Configuration & Supabase Connection
-# ----------------------------------------------------
+# --- 1. CONFIGURATION & APP INITIALIZATION ---
 st.set_page_config(
-    page_title="Equus Performance Therapeutics", page_icon="🐎", layout="wide"
+    page_title="AIA Canada Media Monitor", 
+    layout="wide",
+    page_icon="📊"
 )
 
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-
+GITHUB_REPO = "bbeehler/aia-canada"  
+WORKFLOW_FILE = "monitor.yml"
 
 @st.cache_resource
-def init_supabase() -> Client:
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
-
-
-supabase = init_supabase()
-
-
-# ----------------------------------------------------
-# 2. Secure Hashing & Auth Database Helpers
-# ----------------------------------------------------
-def hash_password(password: str) -> str:
-    salt = "equus_perf_2026_salt"
-    return hashlib.sha256((password + salt).encode("utf-8")).hexdigest()
-
-
-def authenticate_db_user(email: str, password: str):
-    try:
-        clean_email = email.strip().lower()
-        res = (
-            supabase.table("app_users")
-            .select("*")
-            .eq("email", clean_email)
-            .execute()
-        )
-        users = res.data if res.data else []
-        if not users:
-            return None, "No account found with this email address."
-
-        user = users[0]
-        if user.get("status") == "suspended":
-            return (
-                None,
-                "This account is currently suspended. Please contact Paige directly.",
-            )
-
-        pwd_hash = hash_password(password)
-        if user.get("password_hash") != pwd_hash:
-            return None, "Incorrect password. Please try again."
-
-        return user, "Success"
-    except Exception as e:
-        return None, f"Auth Error: {e}"
-
-
-def register_db_user(
-    email: str,
-    password: str,
-    full_name: str,
-    role: str = "Client",
-    phone: str = "",
-):
-    try:
-        clean_email = email.strip().lower()
-        check = (
-            supabase.table("app_users").select("id").eq("email", clean_email).execute()
-        )
-        if check.data and len(check.data) > 0:
-            return False, "An account with this email already exists. Please log in."
-
-        pwd_hash = hash_password(password)
-        payload = {
-            "email": clean_email,
-            "password_hash": pwd_hash,
-            "full_name": full_name.strip(),
-            "role": role,
-            "phone": phone.strip(),
-            "status": "active",
-        }
-        supabase.table("app_users").insert(payload).execute()
-        return True, "Account registered successfully!"
-    except Exception as e:
-        return False, f"Registration Error: {e}"
-
-
-def reset_user_password_db(email: str, new_password: str):
-    try:
-        clean_email = email.strip().lower()
-        pwd_hash = hash_password(new_password)
-        res = (
-            supabase.table("app_users")
-            .update({"password_hash": pwd_hash})
-            .eq("email", clean_email)
-            .execute()
-        )
-        if res.data:
-            return True, "Password updated successfully!"
-        return False, "User email not found."
-    except Exception as e:
-        return False, f"Password Reset Error: {e}"
-
-
-# ----------------------------------------------------
-# 3. Dynamic CMS Content Helper
-# ----------------------------------------------------
-def get_site_content():
-    default_content = {
-        "hero_title": "🐎 EQUUS PERFORMANCE THERAPEUTICS",
-        "hero_subtitle": (
-            "Advanced Cellular Bio-Stimulation & Clinical Airway Halotherapy"
-        ),
-        "hero_badge_1": "📍 Russell & Ottawa Valley",
-        "hero_badge_2": "⚡ High-Energy Cell Treatment (HECT)",
-        "hero_badge_3": "💨 Micro-Particle Halotherapy",
-        "hect_title": "⚡ Equitron-Pro (HECT)",
-        "hect_price": "$60 CAD / 20-min session ($2.00/min)",
-        "hect_desc": (
-            "High-Energy Cell Treatment pulses bio-electromagnetic energy deep"
-            " into cellular tissue, restoring cellular resting potential up to"
-            " 20 cm deep without medication or sedation."
-        ),
-        "hect_bullet_1": "Relieves lumbar, SI & top-line muscular tension",
-        "hect_bullet_2": "Accelerates tendon, ligament & suspensory repair",
-        "hect_bullet_3": "Sore-free, non-invasive biofeedback scan",
-        "halo_title": "💨 HaloEQ2 (Halotherapy)",
-        "halo_price": "$45 CAD / session (Custom Stabling Blocks)",
-        "halo_desc": (
-            "Medical-grade dry aerosol salt halotherapy clears the deepest"
-            " pulmonary bronchioles, flushing mucus, environmental allergens, and"
-            " arena dust."
-        ),
-        "halo_bullet_1": "Anti-bacterial & anti-inflammatory airway flush",
-        "halo_bullet_2": "Enhances oxygenation & stamina in competition",
-        "halo_bullet_3": "Rapid post-trailering respiratory recovery",
-        "corridor_routes": (
-            "* **Monday:** Ottawa Metro & Russell Home Corridor\n* **Tuesday:**"
-            " Kingston Corridor *(South via Hwy 416/401)*\n* **Wednesday:**"
-            " Pembroke & Upper Ottawa Valley *(North via Hwy 17)*\n* **Thursday:**"
-            " Montreal Corridor *(East via Hwy 417)*\n* **Friday:** Flagship"
-            " Partner Facilities Dedicated Intensive"
-        ),
-        "announcement_banner": (
-            "🔔 Now scheduling Fall/Winter Regional Corridor dates across Eastern"
-            " Ontario."
-        ),
-    }
-    try:
-        res = (
-            supabase.table("site_content")
-            .select("content_key, content_value")
-            .execute()
-        )
-        if res.data:
-            for item in res.data:
-                default_content[item["content_key"]] = item["content_value"]
-    except Exception:
-        pass
-    return default_content
-
-
-def update_site_content(content_dict):
-    try:
-        for k, v in content_dict.items():
-            supabase.table("site_content").upsert(
-                {"content_key": k, "content_value": v}
-            ).execute()
-        return True, "Landing page content and pricing updated successfully!"
-    except Exception as e:
-        return False, f"CMS Update Error: {e}"
-
-
-# ----------------------------------------------------
-# 4. Business Logic Helpers
-# ----------------------------------------------------
-def calculate_session_fee(
-    duration_minutes: int,
-    is_flagship: bool,
-    is_marketing_tier: bool,
-    previous_minutes: int,
-):
-    new_total = previous_minutes + duration_minutes
-
-    if not is_flagship:
-        fee = 60.0 if duration_minutes == 20 else duration_minutes * 2.0
-        return fee, new_total, "Standard Mobile Rate ($2.00/min)"
-
-    if is_marketing_tier:
-        if new_total <= 200:
-            return 0.0, new_total, "Promo Allowance (100% Free)"
-        billable = (
-            duration_minutes if previous_minutes >= 200 else (new_total - 200)
-        )
-        return float(billable * 1.0), new_total, "Marketing Tier Overage ($1.00/min)"
-
-    if previous_minutes >= 200:
-        return (
-            float(duration_minutes * 2.0),
-            new_total,
-            "Standard Tier Overage ($2.00/min)",
-        )
-    if new_total <= 200:
-        return (
-            float(duration_minutes * 1.0),
-            new_total,
-            "Standard Tier Baseline ($1.00/min)",
-        )
-
-    base_mins = 200 - previous_minutes
-    overage_mins = new_total - 200
-    fee = (base_mins * 1.0) + (overage_mins * 2.0)
-    return float(fee), new_total, "Standard Tier (Mixed Baseline & Overage Rate)"
-
-
-def calculate_travel_fee(distance_km: float, same_day_horses: int):
-    if same_day_horses >= 3:
-        return 0.0, True, "Group Booking Incentive (3+ Horses: Fee Waived)"
-    if distance_km <= 30:
-        return 0.0, True, "Within Free 30km Base Radius"
-    billable_km = distance_km - 30
-    fee = round(billable_km * 0.73, 2)
-    return fee, False, f"Standard Mileage ({billable_km:.1f} km @ $0.73/km)"
-
-
-def send_email_with_pdf(
-    recipient_email, subject, body_text, pdf_bytes, pdf_filename
-):
-    try:
-        smtp_server = st.secrets.get("SMTP_SERVER", "smtp.gmail.com")
-        smtp_port = int(st.secrets.get("SMTP_PORT", 587))
-        smtp_user = st.secrets.get("SMTP_USERNAME", "")
-        smtp_pass = st.secrets.get("SMTP_PASSWORD", "")
-        sender_email = st.secrets.get("SENDER_EMAIL", smtp_user)
-
-        if not smtp_user or not smtp_pass:
-            return (
-                False,
-                "⚠️ Missing SMTP credentials in Streamlit Secrets. Please check your"
-                " secrets configuration.",
-            )
-
-        msg = MIMEMultipart()
-        msg["From"] = f"Equus Performance Therapeutics <{sender_email}>"
-        msg["To"] = recipient_email
-        msg["Subject"] = subject
-
-        msg.attach(MIMEText(body_text, "plain"))
-
-        part = MIMEApplication(pdf_bytes, Name=pdf_filename)
-        part["Content-Disposition"] = f'attachment; filename="{pdf_filename}"'
-        msg.attach(part)
-
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(smtp_user, smtp_pass)
-            server.send_message(msg)
-
-        return True, f"✅ Statement successfully emailed to {recipient_email}!"
-    except Exception as e:
-        return False, f"❌ Failed to send email: {e}"
-
-
-def get_data_maps():
-    try:
-        barns_res = supabase.table("barns").select("*").execute()
-        barns = barns_res.data if barns_res.data else []
-    except Exception:
-        barns = []
-    barn_map = {b["id"]: b for b in barns}
-
-    try:
-        horses_res = supabase.table("horses").select("*").execute()
-        horses = horses_res.data if horses_res.data else []
-    except Exception:
-        horses = []
-
-    for h in horses:
-        h["barn_details"] = barn_map.get(
-            h.get("barn_id"),
-            {
-                "name": "No Barn",
-                "is_flagship": False,
-                "rate_per_minute": 2.0,
-                "address": "Local Mobile",
-            },
-        )
-
-    return barns, horses, barn_map
-
-
-# ----------------------------------------------------
-# 5. PDF Generator Classes
-# ----------------------------------------------------
-class PDFInvoice(FPDF):
-
-    def header(self):
-        self.set_font("helvetica", "B", 16)
-        self.cell(0, 8, "EQUUS PERFORMANCE THERAPEUTICS", 0, 1, "L")
-        self.set_font("helvetica", "", 10)
-        self.cell(
-            0,
-            5,
-            "Equine Cellular Regeneration & Pulmonary Recovery | Russell, ON",
-            0,
-            1,
-            "L",
-        )
-        self.ln(5)
-        self.set_draw_color(100, 100, 100)
-        self.line(10, self.get_y(), 200, self.get_y())
-        self.ln(5)
-
-    def footer(self):
-        self.set_y(-15)
-        self.set_font("helvetica", "I", 8)
-        self.cell(
-            0,
-            10,
-            f"Page {self.page_no()} | Equus Performance Therapeutics - Official"
-            " Record",
-            0,
-            0,
-            "C",
-        )
-
-
-def create_pdf_invoice(barn_name, invoice_rows, total_billed):
-    pdf = PDFInvoice()
-    pdf.add_page()
-    pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 8, f"STATEMENT OF ACCOUNT: {barn_name.upper()}", 0, 1, "L")
-
-    pdf.set_font("helvetica", "", 10)
-    pdf.cell(
-        0,
-        6,
-        f"Statement Date: {datetime.date.today().strftime('%B %d, %Y')}",
-        0,
-        1,
-    )
-    pdf.cell(
-        0,
-        6,
-        "Payment Terms: Due upon receipt via e-Transfer to"
-        " paige@equusperformance.ca",
-        0,
-        1,
-    )
-    pdf.ln(5)
-
-    pdf.set_font("helvetica", "B", 9)
-    pdf.set_fill_color(240, 240, 240)
-    pdf.cell(22, 7, "Date", 1, 0, "C", True)
-    pdf.cell(38, 7, "Horse Name", 1, 0, "L", True)
-    pdf.cell(32, 7, "Owner", 1, 0, "L", True)
-    pdf.cell(38, 7, "Modality", 1, 0, "L", True)
-    pdf.cell(15, 7, "Mins", 1, 0, "C", True)
-    pdf.cell(22, 7, "Fee (CAD)", 1, 0, "R", True)
-    pdf.cell(23, 7, "Notes", 1, 1, "L", True)
-
-    pdf.set_font("helvetica", "", 8)
-    for r in invoice_rows:
-        pdf.cell(22, 6, str(r["Date"]), 1, 0, "C")
-        pdf.cell(38, 6, str(r["Horse Name"][:20]), 1, 0, "L")
-        pdf.cell(32, 6, str(r["Owner"][:18]), 1, 0, "L")
-        pdf.cell(38, 6, str(r["Modality"][:20]), 1, 0, "L")
-        pdf.cell(15, 6, str(r["Duration (Mins)"]), 1, 0, "C")
-        pdf.cell(22, 6, str(r["Fee (CAD)"]), 1, 0, "R")
-        pdf.cell(23, 6, str(r["Notes"][:15]), 1, 1, "L")
-
-    pdf.ln(5)
-    pdf.set_font("helvetica", "B", 12)
-    pdf.cell(0, 8, f"Total Balance Due: ${total_billed:.2f} CAD", 0, 1, "R")
-
-    return pdf.output()
-
-
-def create_facility_reconciliation_pdf(
-    barn_obj, horse_summary_rows, total_billed, total_waived
-):
-    pdf = PDFInvoice()
-    pdf.add_page()
-    pdf.set_font("helvetica", "B", 14)
-    pdf.cell(
-        0,
-        8,
-        f"FACILITY RETAINER & RECONCILIATION: {barn_obj.get('name', 'Facility').upper()}",
-        0,
-        1,
-        "L",
-    )
-
-    pdf.set_font("helvetica", "", 10)
-    pdf.cell(
-        0,
-        5,
-        f"Billing Period: {datetime.date.today().strftime('%B %Y')} | Status: "
-        f"{'Flagship Reference Facility' if barn_obj.get('is_flagship') else 'Standard Partner Facility'}",
-        0,
-        1,
-    )
-    pdf.cell(
-        0,
-        5,
-        "Payment Terms: Due upon receipt via e-Transfer to"
-        " paige@equusperformance.ca",
-        0,
-        1,
-    )
-    pdf.ln(5)
-
-    pdf.set_font("helvetica", "B", 9)
-    pdf.set_fill_color(240, 240, 240)
-    pdf.cell(40, 7, "Horse Name", 1, 0, "L", True)
-    pdf.cell(35, 7, "Owner", 1, 0, "L", True)
-    pdf.cell(35, 7, "Tier Status", 1, 0, "C", True)
-    pdf.cell(25, 7, "Mins Used", 1, 0, "C", True)
-    pdf.cell(25, 7, "Waived Value", 1, 0, "R", True)
-    pdf.cell(30, 7, "Billable Fee", 1, 1, "R", True)
-
-    pdf.set_font("helvetica", "", 8)
-    for r in horse_summary_rows:
-        pdf.cell(40, 6, str(r["Horse Name"][:20]), 1, 0, "L")
-        pdf.cell(35, 6, str(r["Owner"][:18]), 1, 0, "L")
-        pdf.cell(35, 6, str(r["Tier"]), 1, 0, "C")
-        pdf.cell(25, 6, str(r["Minutes Used"]), 1, 0, "C")
-        pdf.cell(25, 6, str(r["Waived Promo"]), 1, 0, "R")
-        pdf.cell(30, 6, str(r["Total Billable"]), 1, 1, "R")
-
-    pdf.ln(6)
-    pdf.set_font("helvetica", "B", 11)
-    pdf.cell(
-        0,
-        6,
-        f"Total Promotional Allowance Provided: ${total_waived:.2f} CAD",
-        0,
-        1,
-        "R",
-    )
-    pdf.set_font("helvetica", "B", 12)
-    pdf.cell(0, 7, f"Net Facility Total Due: ${total_billed:.2f} CAD", 0, 1, "R")
-
-    return pdf.output()
-
-
-def create_vet_report_pdf(horse_obj, vet_name, clinical_logs):
-    pdf = PDFInvoice()
-    pdf.add_page()
-
-    pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 8, "CLINICAL THERAPY & REHABILITATION SUMMARY", 0, 1, "L")
-    pdf.set_font("helvetica", "", 10)
-    pdf.cell(
-        0, 5, f"Report Date: {datetime.date.today().strftime('%B %d, %Y')}", 0, 1
-    )
-    pdf.cell(0, 5, "Attending Specialist: Paige Cummings (EquusOS Hub)", 0, 1)
-    pdf.ln(3)
-
-    pdf.set_fill_color(245, 245, 245)
-    pdf.rect(10, pdf.get_y(), 190, 22, "F")
-    pdf.set_xy(12, pdf.get_y() + 2)
-
-    pdf.set_font("helvetica", "B", 10)
-    pdf.cell(
-        90,
-        5,
-        f"Patient: {horse_obj.get('name', 'N/A')} (Owner:"
-        f" {horse_obj.get('owner_name', 'N/A')})",
-        0,
-        0,
-    )
-    pdf.cell(
-        90,
-        5,
-        f"Facility: {horse_obj.get('barn_details', {}).get('name', 'N/A')}",
-        0,
-        1,
-    )
-    pdf.set_xy(12, pdf.get_y())
-    pdf.set_font("helvetica", "", 9)
-    pdf.cell(
-        90,
-        5,
-        f"Primary Veterinarian: {vet_name if vet_name else 'On File'}",
-        0,
-        0,
-    )
-    total_mins = sum(int(l.get("duration_minutes", 0)) for l in clinical_logs)
-    pdf.cell(90, 5, f"Cumulative Therapy Logged: {total_mins} Minutes", 0, 1)
-    pdf.ln(8)
-
-    pdf.set_font("helvetica", "B", 11)
-    pdf.cell(0, 7, "Chronological Treatment History & Clinical Notes", 0, 1)
-
-    for log in clinical_logs:
-        pdf.set_draw_color(200, 200, 200)
-        pdf.set_font("helvetica", "B", 9)
-        date_str = str(log.get("created_at", ""))[:10]
-        modality_str = str(log.get("modality", "Therapy"))
-        mins_str = str(log.get("duration_minutes", "20"))
-        pdf.cell(0, 6, f"[{date_str}] - {modality_str} ({mins_str} mins)", "B", 1)
-
-        pdf.set_font("helvetica", "", 8)
-        notes_clean = str(
-            log.get("session_notes", "Routine complementary therapy administered.")
-        )
-        pdf.multi_cell(0, 5, f"Observations: {notes_clean}")
-        pdf.ln(2)
-
-    pdf.ln(4)
-    pdf.set_font("helvetica", "I", 8)
-    pdf.multi_cell(
-        0,
-        4,
-        "Disclaimer: Equus Performance Therapeutics provides complementary"
-        " non-invasive wellness, high-energy cellular bio-stimulation, and dry"
-        " salt halotherapy. This summary is intended to support collaborative"
-        " veterinary diagnosis and management.",
-    )
-
-    return pdf.output()
-
-
-# ----------------------------------------------------
-# 6. Global Auth State & Public Marketing Landing
-# ----------------------------------------------------
-barns, horses, barn_map = get_data_maps()
-site_content = get_site_content()
-
+def init_connections():
+    sb_url = st.secrets["SUPABASE_URL"]
+    sb_key = st.secrets["SUPABASE_KEY"]
+    gemini_key = st.secrets["GEMINI_API_KEY"]
+    
+    sb_client = create_client(sb_url, sb_key)
+    gem_client = genai.Client(api_key=gemini_key)
+    return sb_client, gem_client
+
+try:
+    supabase, ai_client = init_connections()
+except Exception as e:
+    st.error("Initialization Error: Check your Streamlit Secrets configuration.")
+    st.stop()
+
+# --- 🔐 SUPABASE AUTH & ROLE LOOKUP INTERCEPTOR ---
 if "auth_user" not in st.session_state:
     st.session_state["auth_user"] = None
-if "auth_role" not in st.session_state:
-    st.session_state["auth_role"] = None
-if "auth_name" not in st.session_state:
-    st.session_state["auth_name"] = ""
+if "user_role" not in st.session_state:
+    st.session_state["user_role"] = "Viewer"  
+if "user_full_name" not in st.session_state:
+    st.session_state["user_full_name"] = ""
 
-# ====================================================
-# MARKETING SHOWCASE LANDING PAGE & UNIVERSAL LOGIN
-# ====================================================
 if st.session_state["auth_user"] is None:
-    if site_content.get("announcement_banner"):
-        st.info(site_content["announcement_banner"])
-
-    st.markdown(
-        f"""
-    <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 36px 24px; border-radius: 16px; color: white; text-align: center; margin-bottom: 24px;">
-        <h1 style="font-size: 2.8rem; margin: 0; color: #f8fafc; letter-spacing: -0.5px;">{site_content.get('hero_title', '🐎 EQUUS PERFORMANCE THERAPEUTICS')}</h1>
-        <p style="font-size: 1.25rem; color: #94a3b8; margin: 8px 0 16px 0; font-weight: 300;">{site_content.get('hero_subtitle', 'Advanced Cellular Bio-Stimulation & Clinical Airway Halotherapy')}</p>
-        <div style="display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;">
-            <span style="background: rgba(255,255,255,0.1); padding: 6px 14px; border-radius: 20px; font-size: 0.9rem;">{site_content.get('hero_badge_1', '📍 Russell & Ottawa Valley')}</span>
-            <span style="background: rgba(255,255,255,0.1); padding: 6px 14px; border-radius: 20px; font-size: 0.9rem;">{site_content.get('hero_badge_2', '⚡ High-Energy Cell Treatment (HECT)')}</span>
-            <span style="background: rgba(255,255,255,0.1); padding: 6px 14px; border-radius: 20px; font-size: 0.9rem;">{site_content.get('hero_badge_3', '💨 Micro-Particle Halotherapy')}</span>
-        </div>
-    </div>
-    """,
-        unsafe_allow_html=True,
-    )
-
-    landing_col_left, landing_col_right = st.columns([3, 2])
-
-    with landing_col_left:
-        st.markdown("### 🌟 Clinical Services & Therapy Rates")
-
-        m_col1, m_col2 = st.columns(2)
-        with m_col1:
-            st.markdown(
-                f"""
-            <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px; height: 100%;">
-                <h4 style="margin-top: 0; color: #0284c7;">{site_content.get('hect_title')}</h4>
-                <p style="font-size: 0.95rem; font-weight: bold; color: #0f172a; margin-bottom: 6px;">💵 Rate: {site_content.get('hect_price')}</p>
-                <p style="font-size: 0.88rem; color: #475569; line-height: 1.5;">
-                    {site_content.get('hect_desc')}
-                </p>
-                <ul style="font-size: 0.82rem; color: #334155; padding-left: 18px;">
-                    <li>{site_content.get('hect_bullet_1')}</li>
-                    <li>{site_content.get('hect_bullet_2')}</li>
-                    <li>{site_content.get('hect_bullet_3')}</li>
-                </ul>
-            </div>
-            """,
-                unsafe_allow_html=True,
-            )
-
-        with m_col2:
-            st.markdown(
-                f"""
-            <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px; height: 100%;">
-                <h4 style="margin-top: 0; color: #0d9488;">{site_content.get('halo_title')}</h4>
-                <p style="font-size: 0.95rem; font-weight: bold; color: #0f172a; margin-bottom: 6px;">💵 Rate: {site_content.get('halo_price')}</p>
-                <p style="font-size: 0.88rem; color: #475569; line-height: 1.5;">
-                    {site_content.get('halo_desc')}
-                </p>
-                <ul style="font-size: 0.82rem; color: #334155; padding-left: 18px;">
-                    <li>{site_content.get('halo_bullet_1')}</li>
-                    <li>{site_content.get('halo_bullet_2')}</li>
-                    <li>{site_content.get('halo_bullet_3')}</li>
-                </ul>
-            </div>
-            """,
-                unsafe_allow_html=True,
-            )
-
-        st.markdown("<div style='margin-top: 18px;'></div>", unsafe_allow_html=True)
-        st.markdown("### 🗺️ Designated Corridor Travel Schedule")
-        st.markdown(site_content.get("corridor_routes", ""))
-
-    with landing_col_right:
-        st.markdown("### 🔐 Member & Specialist Access")
-        portal_tabs = st.tabs(["Universal Sign-In", "Owner Registration & Horses"])
-
-        # TAB 1: UNIVERSAL SIGN-IN
-        with portal_tabs[0]:
-            st.caption(
-                "Sign in with your email to access your client dashboard, horses, or"
-                " specialist admin suite."
-            )
-            with st.form("universal_login_form"):
-                u_email = st.text_input("Email Address", placeholder="name@domain.ca")
-                u_pwd = st.text_input(
-                    "Password", type="password", placeholder="••••••••"
-                )
-
-                if st.form_submit_button(
-                    "Sign In to EquusOS", use_container_width=True
-                ):
-                    if u_email and u_pwd:
-                        user_obj, msg = authenticate_db_user(u_email, u_pwd)
-                        if user_obj:
-                            st.session_state["auth_user"] = user_obj.get("email")
-                            st.session_state["auth_role"] = user_obj.get("role", "Client")
-                            st.session_state["auth_name"] = user_obj.get("full_name")
-                            st.success(f"Welcome, {user_obj.get('full_name')}!")
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                    else:
-                        st.warning("Please enter your email and password.")
-
-            with st.expander("Reset Password"):
-                with st.form("universal_pwd_reset"):
-                    r_email = st.text_input("Registered Email")
-                    r_pwd = st.text_input("New Password", type="password")
-                    if st.form_submit_button("Update Password"):
-                        if r_email and r_pwd:
-                            ok, r_msg = reset_user_password_db(r_email, r_pwd)
-                            if ok:
-                                st.success(r_msg)
-                            else:
-                                st.error(r_msg)
-                        else:
-                            st.warning("Please enter your email and new password.")
-
-        # TAB 2: NEW OWNER REGISTRATION
-        with portal_tabs[1]:
-            st.caption(
-                "Register as an owner (multiple horses supported) and execute intake"
-                " waiver."
-            )
-            with st.form("landing_signup_form"):
-                reg_name = st.text_input("Owner Full Name*")
-                reg_email = st.text_input("Email Address (Login)*")
-                reg_pwd = st.text_input("Create Password*", type="password")
-                reg_phone = st.text_input("Mobile Phone (for SMS)*")
-
-                st.markdown("---")
-                st.markdown("#### Primary Horse / Animal Profile")
-                reg_horse = st.text_input("Horse Name (Show / Barn Name)*")
-                barn_names = [b["name"] for b in barns] if barns else ["Private Facility"]
-                reg_barn = st.selectbox("Stabling Facility / Barn*", barn_names)
-                reg_vet = st.text_input(
-                    "Primary Veterinarian", placeholder="e.g. Dr. Smith"
-                )
-
-                reg_agree = st.checkbox(
-                    "I agree to the liability waiver & complementary care terms.*"
-                )
-                reg_sig = st.text_input("Digital Signature (Full Legal Name)*")
-
-                if st.form_submit_button(
-                    "Complete Owner Registration", use_container_width=True
-                ):
-                    if reg_name and reg_email and reg_pwd and reg_horse and reg_sig:
-                        if not reg_agree:
-                            st.error("Please accept the waiver terms.")
-                        else:
-                            ok, msg = register_db_user(
-                                reg_email, reg_pwd, reg_name, role="Client", phone=reg_phone
-                            )
-                            if ok:
-                                o_res = (
-                                    supabase.table("owners")
-                                    .insert({
-                                        "full_name": reg_name,
-                                        "email": reg_email.strip().lower(),
-                                        "phone_number": reg_phone.strip(),
-                                    })
-                                    .execute()
-                                )
-                                owner_id_val = o_res.data[0]["id"] if o_res.data else None
-
-                                supabase.table("client_waivers").insert({
-                                    "owner_name": reg_name,
-                                    "client_email": reg_email.strip().lower(),
-                                    "horse_name": reg_horse,
-                                    "primary_veterinarian": reg_vet,
-                                    "modality_consent": [
-                                        "Equitron-Pro (HECT)",
-                                        "HaloEQ2 (Halotherapy)",
-                                    ],
-                                    "waiver_agreed": True,
-                                    "signature_name": reg_sig,
-                                }).execute()
-
-                                barn_id_match = next(
-                                    (b["id"] for b in barns if b["name"] == reg_barn),
-                                    barns[0]["id"] if barns else None,
-                                )
-                                supabase.table("horses").insert({
-                                    "name": reg_horse,
-                                    "owner_name": reg_name,
-                                    "owner_id": owner_id_val,
-                                    "barn_id": barn_id_match,
-                                    "is_marketing_tier": False,
-                                    "minutes_used_this_month": 0,
-                                }).execute()
-
-                                st.session_state["auth_user"] = reg_email.strip().lower()
-                                st.session_state["auth_role"] = "Client"
-                                st.session_state["auth_name"] = reg_name
-                                st.success(f"Account created! Welcome, {reg_name}!")
-                                st.rerun()
-                            else:
-                                st.error(msg)
-                    else:
-                        st.warning("Please fill in all required fields.")
-
-    st.stop()
-
-
-# ----------------------------------------------------
-# 7. AUTHENTICATED SESSIONS (Client vs Paige Specialist)
-# ----------------------------------------------------
-st.sidebar.title("🐎 EquusOS")
-st.sidebar.markdown(
-    f"**Logged in:** `{st.session_state['auth_name']}`"
-    f" ({st.session_state['auth_role']})"
-)
-
-if st.sidebar.button("🚪 Sign Out"):
-    st.session_state["auth_user"] = None
-    st.session_state["auth_role"] = None
-    st.session_state["auth_name"] = ""
-    st.rerun()
-
-st.sidebar.divider()
-
-# ====================================================
-# A. CLIENT MEMBER PORTAL EXPERIENCE
-# ====================================================
-if st.session_state["auth_role"] == "Client":
-    matched_owner_name = st.session_state["auth_name"]
-    active_client_email = st.session_state["auth_user"]
-
-    st.title(f"🐎 Welcome, {matched_owner_name}")
-    st.caption(f"Equus Member Dashboard | Linked Account: {active_client_email}")
-
-    client_horses = [
-        h
-        for h in horses
-        if h.get("owner_name", "").lower() == matched_owner_name.lower()
-    ]
-    client_h_ids = [h["id"] for h in client_horses]
-
-    try:
-        appts_res = supabase.table("appointments").select("*").in_("horse_id", client_h_ids).order("appointment_date").execute()
-        my_appts = appts_res.data if appts_res.data else []
-    except Exception:
-        my_appts = []
-
-    with st.container():
-        st.subheader("🗓️ Next Visit & Arrival Window")
-        if my_appts:
-            for a in my_appts:
-                h_obj = next(
-                    (h for h in client_horses if h["id"] == a["horse_id"]), {}
-                )
-                st_badge = (
-                    "🟠 Pending Approval (Tentative)"
-                    if a.get("status") == "Tentative"
-                    else "🟢 Confirmed Booking"
-                )
-                st.info(f"""
-                📍 **Appointment Date:** **{a.get('appointment_date')}**  
-                🐎 **Patient:** **{h_obj.get('name', 'Your Horse')}** @ {h_obj.get('barn_details', {}).get('name', 'Barn')}  
-                ⏱️ **Booking Status:** `{st_badge}` | **Estimated Travel / Mileage:** ${float(a.get('travel_fee', 0)):.2f} CAD
-                """)
-        else:
-            st.info(
-                "No upcoming visits currently booked. Request your next corridor"
-                " session below!"
-            )
-
-    st.divider()
-
-    c_tab1, c_tab2, c_tab3, c_tab4 = st.tabs([
-        "🐎 My Animals & Clinical History",
-        "📅 Request Corridor Visit (Tentative)",
-        "📸 Photo & Video Gallery",
-        "💳 Invoices & Make Payment",
-    ])
-
-    with c_tab1:
-        st.subheader("Register Additional Animal / Horse")
-        with st.form("client_add_animal_form"):
-            new_h_name = st.text_input("New Horse Name*")
-            new_h_barn = st.selectbox(
-                "Stabling Facility / Barn*",
-                [b["name"] for b in barns] if barns else ["Private Facility"],
-            )
-            if st.form_submit_button("Add Animal to My Account"):
-                if new_h_name and barns:
-                    barn_id_match = next(
-                        (b["id"] for b in barns if b["name"] == new_h_barn), barns[0]["id"]
-                    )
-
-                    try:
-                        ow_r = (
-                            supabase.table("owners")
-                            .select("id")
-                            .eq("email", active_client_email)
-                            .execute()
-                        )
-                        ow_id = ow_r.data[0]["id"] if ow_r.data else None
-                    except Exception:
-                        ow_id = None
-
-                    supabase.table("horses").insert({
-                        "name": new_h_name,
-                        "owner_name": matched_owner_name,
-                        "owner_id": ow_id,
-                        "barn_id": barn_id_match,
-                        "is_marketing_tier": False,
-                        "minutes_used_this_month": 0,
-                    }).execute()
-                    st.success(f"Added {new_h_name} to your profile!")
-                    st.rerun()
-
-        st.subheader("My Horses & Clinical Progress Notes")
-        if client_horses:
-            chosen_h = st.selectbox(
-                "Select Your Horse",
-                [h["name"] for h in client_horses],
-                key="client_tab1_h",
-            )
-            h_obj = next(h for h in client_horses if h["name"] == chosen_h)
-
-            st.metric(
-                "Total Therapy Logged This Month",
-                f"{h_obj.get('minutes_used_this_month', 0)} Minutes",
-            )
-
-            try:
-                l_res = (
-                    supabase.table("treatment_logs")
-                    .select("*")
-                    .eq("horse_id", str(h_obj["id"]))
-                    .order("created_at", desc=True)
-                    .execute()
-                )
-                h_logs = l_res.data if l_res.data else []
-            except Exception:
-                h_logs = []
-
-            if h_logs:
-                for l in h_logs:
-                    st.markdown(
-                        f"**[{l.get('created_at','')[:10]}] - `{l.get('modality')}`"
-                        f" ({l.get('duration_minutes')} mins)**"
-                    )
-                    st.caption(f"Clinical Observations: {l.get('session_notes')}")
-                    st.divider()
-            else:
-                st.write("No session records found for this horse yet.")
-        else:
-            st.info("No horses linked to your account yet.")
-
-    with c_tab2:
-        st.subheader("Request Corridor Visit (Subject to Admin Confirmation)")
-        with st.form("client_portal_book_form"):
-            b_h = st.selectbox(
-                "Select Horse",
-                [h["name"] for h in client_horses]
-                if client_horses
-                else ["No horse registered"],
-            )
-            b_d = st.date_input(
-                "Preferred Date", datetime.date.today() + datetime.timedelta(days=1)
-            )
-            b_mod = st.selectbox(
-                "Therapy Modality",
-                [
-                    "Equitron-Pro (HECT)",
-                    "HaloEQ2 (Halotherapy)",
-                    "Peak Performance Combo",
-                ],
-            )
-            b_notes = st.text_area(
-                "Observations for Paige (e.g. slight right stifle stiffness, prep for"
-                " show)"
-            )
-
-            if st.form_submit_button("Submit Tentative Booking Request"):
-                if client_horses:
-                    sel_h = next(h for h in client_horses if h["name"] == b_h)
-                    try:
-                        supabase.table("appointments").insert({
-                            "appointment_date": str(b_d),
-                            "horse_id": str(sel_h["id"]),
-                            "barn_id": str(sel_h.get("barn_id")),
-                            "distance_from_base_km": 30.0,
-                            "travel_fee": 0.0,
-                            "status": "Tentative",
-                        }).execute()
-                        st.success(
-                            f"Tentative booking submitted for {b_h} on {b_d}! Waiting for"
-                            " Paige to confirm."
-                        )
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Booking error: {e}")
-
-    with c_tab3:
-        st.subheader("Visual Progress Gallery (Before & After Stance / Gait)")
-        if client_horses:
-            chosen_h_gal = st.selectbox(
-                "Select Animal for Media",
-                [h["name"] for h in client_horses],
-                key="client_gal_h",
-            )
-            h_gal_obj = next(
-                h for h in client_horses if h["name"] == chosen_h_gal
-            )
-
-            try:
-                m_res = (
-                    supabase.table("horse_media_records")
-                    .select("*")
-                    .eq("horse_id", str(h_gal_obj["id"]))
-                    .order("record_date", desc=True)
-                    .execute()
-                )
-                h_media = m_res.data if m_res.data else []
-            except Exception:
-                h_media = []
-
-            if h_media:
-                for m in h_media:
-                    st.markdown(
-                        f"**{m.get('caption', 'Clinical Scan')}** —"
-                        f" `{m.get('stage_category')}` ({m.get('record_date')})"
-                    )
-                    if m.get("media_type") == "Image":
-                        st.image(m.get("media_url"), use_container_width=True)
-                    else:
-                        st.markdown(
-                            f"🔗 [Watch Movement Video]({m.get('media_url')})"
-                        )
-                    st.divider()
-            else:
-                st.info("No photos or videos logged for this animal yet.")
-        else:
-            st.info("Please register a horse profile first.")
-
-    with c_tab4:
-        st.subheader("Account Statements & Payment Submission")
-        try:
-            pmts_res = (
-                supabase.table("client_payments")
-                .select("*")
-                .eq("owner_name", matched_owner_name)
-                .execute()
-            )
-            my_payments = pmts_res.data if pmts_res.data else []
-        except Exception:
-            my_payments = []
-
-        total_paid_client = sum(
-            float(p.get("amount_paid", 0)) for p in my_payments
-        )
-        st.metric("Total Payments Settled", f"${total_paid_client:,.2f} CAD")
-
-        st.markdown("### Remit Payment via e-Transfer")
-        st.info("""
-        * **e-Transfer Recipient:** `paige@equusperformance.ca`
-        * **Business Name:** Equus Performance Therapeutics
-        * **Notes:** Please include your horse's name in the e-Transfer description.
-        """)
-
-        with st.form("client_log_payment_form"):
-            st.markdown("#### Confirm Payment Sent")
-            p_amt = st.number_input(
-                "Amount Sent ($ CAD)", min_value=10.0, value=60.0, step=10.0
-            )
-            p_ref = st.text_input("e-Transfer Reference / Confirmation Number*")
-            if st.form_submit_button("Submit Payment Confirmation"):
-                if p_ref:
-                    try:
-                        supabase.table("client_payments").insert({
-                            "payment_date": str(datetime.date.today()),
-                            "owner_name": matched_owner_name,
-                            "amount_paid": float(p_amt),
-                            "payment_method": "e-Transfer",
-                            "reference_number": p_ref,
-                            "notes": (
-                                "Submitted directly by client via portal for"
-                                f" {matched_owner_name}"
-                            ),
-                        }).execute()
-                        st.success(
-                            f"Payment of ${p_amt:.2f} logged! Paige will verify against"
-                            " bank records."
-                        )
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-                else:
-                    st.warning("Please enter your e-Transfer confirmation number.")
-
-    st.stop()
-
-
-# ====================================================
-# B. SPECIALIST / ADMIN WORKFLOW (PAIGE)
-# ====================================================
-CATEGORY_WORKFLOWS = {
-    "🐎 Daily Clinical Hub": [
-        "Log Treatments & Live Feed",
-        "Clinical Progression & Biofeedback",
-        "Photo & Video Progress Gallery",
-        "Veterinary Clinical Reports",
-        "Client Health Portal",
-    ],
-    "🗓️ Dispatch & Corridors": [
-        "Interactive Booking Calendar",
-        "Corridor Calendar & Daily Run-Sheet",
-        "Smart Route Booking & Mileage",
-        "Client Re-booking & SMS Reminders",
-    ],
-    "👥 User & Client Management": [
-        "Landing Page & Pricing CMS",
-        "User Database & Credentials",
-        "Manage Clients & Appointments",
-        "Public Intake & Barn QR Code",
-        "Signed Waivers & Onboarding",
-        "Facility Retainers & Reconciliation",
-        "Pre-Paid Packages & Credit Passes",
-        "Trainer & Referral Incentives",
-    ],
-    "📊 Accounting & Bookkeeping": [
-        "Accounts Payable (A/P) Bills",
-        "Accounts Receivable (A/R) Aging",
-        "HST / Sales Tax (CRA ITC Report)",
-        "Chart of Accounts & General Ledger",
-        "Accountant Handoff Export Pack",
-        "Email Invoice Dispatcher",
-        "Monthly Invoicing & PDF Statements",
-        "Corridor Travel & Fuel Expenses",
-        "Executive P&L Snapshot",
-    ],
-}
-
-selected_category = st.sidebar.selectbox(
-    "📂 Workspace Section", list(CATEGORY_WORKFLOWS.keys())
-)
-page = st.sidebar.radio(
-    "📌 Select Module", CATEGORY_WORKFLOWS[selected_category]
-)
-
-# ----------------------------------------------------
-# 1. INTERACTIVE BOOKING CALENDAR FOR PAIGE
-# ----------------------------------------------------
-if page == "Interactive Booking Calendar":
-    st.title("📅 Interactive Master Booking Calendar")
-    st.markdown(
-        "Visually review scheduled and tentative client bookings, approve"
-        " requests, and click through to edit or reschedule."
-    )
-
-    try:
-        appts_res = (
-            supabase.table("appointments")
-            .select("*")
-            .order("appointment_date")
-            .execute()
-        )
-        all_appts = appts_res.data if appts_res.data else []
-    except Exception:
-        all_appts = []
-
-    horse_map = {h["id"]: h for h in horses}
-
-    status_filter = st.radio(
-        "Filter Bookings",
-        [
-            "All Bookings",
-            "⚠️ Tentative Requests (Needs Confirmation)",
-            "✅ Confirmed Bookings",
-        ],
-        horizontal=True,
-    )
-
-    filtered_appts = all_appts
-    if status_filter == "⚠️ Tentative Requests (Needs Confirmation)":
-        filtered_appts = [a for a in all_appts if a.get("status") == "Tentative"]
-    elif status_filter == "✅ Confirmed Bookings":
-        filtered_appts = [a for a in all_appts if a.get("status") == "Confirmed"]
-
-    if filtered_appts:
-        for a in filtered_appts:
-            h_info = horse_map.get(a.get("horse_id"), {})
-            b_info = h_info.get("barn_details", {})
-            st_col = "orange" if a.get("status") == "Tentative" else "green"
-
-            with st.container():
-                c_cal1, c_cal2, c_cal3 = st.columns([3, 2, 2])
-                with c_cal1:
-                    st.markdown(
-                        f"### 📅 {a.get('appointment_date')} — **{h_info.get('name', 'Unknown Horse')}**"
-                    )
-                    st.caption(
-                        f"Owner: **{h_info.get('owner_name', 'N/A')}** | Facility:"
-                        f" **{b_info.get('name', 'No Barn')}**"
-                    )
-                with c_cal2:
-                    st.markdown(f"**Status:** :{st_col}[{a.get('status', 'Tentative')}]")
-                    st.caption(
-                        f"Travel Fee: ${float(a.get('travel_fee', 0)):.2f} CAD"
-                        f" ({a.get('distance_from_base_km', 30)} km)"
-                    )
-                with c_cal3:
-                    if a.get("status") == "Tentative":
-                        if st.button("✅ Confirm Booking", key=f"conf_{a['id']}"):
-                            supabase.table("appointments").update(
-                                {"status": "Confirmed"}
-                            ).eq("id", a["id"]).execute()
-                            st.success("Booking confirmed!")
-                            st.rerun()
-
-                    if st.button("🗑️ Cancel / Delete", key=f"del_{a['id']}"):
-                        supabase.table("appointments").delete().eq("id", a["id"]).execute()
-                        st.warning("Booking deleted.")
-                        st.rerun()
-                st.divider()
-    else:
-        st.info("No bookings match the selected filter.")
-
-# ----------------------------------------------------
-# 2. CLIENT RE-BOOKING & SMS DISPATCH
-# ----------------------------------------------------
-elif page == "Client Re-booking & SMS Reminders":
-    st.title("💬 Automated Client SMS Dispatch & Notifications")
-    st.markdown(
-        "Generate 1-click SMS appointment confirmations, post-treatment"
-        " follow-ups, and route dispatch notices."
-    )
-
-    if horses:
-        col_r1, col_r2 = st.columns([1, 1])
-
-        with col_r1:
-            st.subheader("1. Message Builder")
-            horse_pick = {
-                f"{h['name']} ({h['owner_name']}) | {h['barn_details']['name']}": h
-                for h in horses
-            }
-            chosen_h_label = st.selectbox(
-                "Select Horse / Owner", list(horse_pick.keys())
-            )
-            h_rem = horse_pick[chosen_h_label]
-
-            try:
-                ow_res = (
-                    supabase.table("owners")
-                    .select("phone_number")
-                    .eq("full_name", h_rem.get("owner_name"))
-                    .execute()
-                )
-                def_phone = (
-                    ow_res.data[0].get("phone_number", "") if ow_res.data else ""
-                )
-            except Exception:
-                def_phone = ""
-
-            phone_num = st.text_input(
-                "Owner Mobile Number", value=def_phone, placeholder="6135551234"
-            )
-
-            reminder_type = st.selectbox(
-                "Message Template",
-                [
-                    "Appointment Confirmation & ETA",
-                    "48-Hour Post-Equitron Recovery Check-In",
-                    "Bi-Weekly Maintenance Re-Booking Prompt",
-                    "Group Barn Route Booking Callout",
-                ],
-            )
-
-            appt_date_txt = st.date_input("Appointment Date", datetime.date.today())
-            arrival_window = st.selectbox(
-                "Estimated Arrival Window",
-                [
-                    "Morning (9:00 AM - 11:00 AM)",
-                    "Midday (11:00 AM - 1:00 PM)",
-                    "Afternoon (1:00 PM - 3:30 PM)",
-                    "Late Afternoon (3:30 PM - 5:30 PM)",
-                ],
-            )
-
-        with col_r2:
-            st.subheader("2. SMS Preview & 1-Click Dispatch")
-
-            owner_first = (
-                h_rem.get("owner_name", "there").split()[0]
-                if h_rem.get("owner_name")
-                else "there"
-            )
-            horse_n = h_rem.get("name", "your horse")
-            barn_n = h_rem.get("barn_details", {}).get("name", "the barn")
-
-            if reminder_type == "Appointment Confirmation & ETA":
-                message_body = (
-                    f"Hi {owner_first}! Confirming our Equus Performance session for"
-                    f" {horse_n} on {appt_date_txt.strftime('%A, %b %d')} at {barn_n}."
-                    f" Our estimated arrival window is {arrival_window}. Please ensure"
-                    f" {horse_n} is brought in and dry. Looking forward to seeing you!"
-                )
-            elif reminder_type == "48-Hour Post-Equitron Recovery Check-In":
-                message_body = (
-                    f"Hi {owner_first}! Just checking in on {horse_n} following our"
-                    " Equitron session. How is their topline and movement feeling under"
-                    " saddle? Let me know if you noticed any relaxed biofeedback"
-                    " changes!"
-                )
-            elif reminder_type == "Bi-Weekly Maintenance Re-Booking Prompt":
-                message_body = (
-                    f"Hi {owner_first}! It has been about two weeks since {horse_n}'s"
-                    " last cellular therapy session. We are scheduling our upcoming"
-                    f" corridor run to {barn_n}. Would you like to reserve a spot to"
-                    " maintain their peak performance?"
-                )
-            else:
-                message_body = (
-                    f"Hi {owner_first}! We are opening our route dispatch to {barn_n}"
-                    f" for {appt_date_txt.strftime('%A, %b %d')}. If we group 3 or"
-                    " more horses together, travel mileage fees are 100% waived! Let me"
-                    f" know if you'd like to include {horse_n}."
-                )
-
-            st.text_area(
-                "SMS Body", value=message_body, height=140, key="sms_preview_box"
-            )
-
-            clean_phone = "".join(filter(str.isdigit, phone_num))
-            if len(clean_phone) == 10:
-                clean_phone = "1" + clean_phone
-
-            if clean_phone:
-                encoded_msg = urllib.parse.quote(message_body)
-                sms_url = f"sms:{clean_phone}?body={encoded_msg}"
-
-                st.markdown(
-                    f"""
-                    <a href="{sms_url}" target="_blank">
-                        <button style="
-                            background-color: #0284c7;
-                            color: white;
-                            border: none;
-                            padding: 12px 24px;
-                            font-size: 16px;
-                            border-radius: 8px;
-                            cursor: pointer;
-                            font-weight: bold;
-                            width: 100%;
-                        ">💬 Send Direct SMS</button>
-                    </a>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.caption(
-                    "💡 Enter a phone number above to enable 1-click SMS dispatching."
-                )
-    else:
-        st.info("Please register a horse profile first.")
-
-# ----------------------------------------------------
-# 3. CORRIDOR CALENDAR & DAILY RUN-SHEET
-# ----------------------------------------------------
-elif page == "Corridor Calendar & Daily Run-Sheet":
-    st.title("📅 Corridor Schedule & Daily Dispatch Run-Sheet")
-    st.markdown(
-        "Organize weekly corridor runs, track stop order, and generate daily"
-        " mobile dispatch sheets."
-    )
-
-    try:
-        appts_res = (
-            supabase.table("appointments")
-            .select("*")
-            .order("appointment_date")
-            .execute()
-        )
-        all_appts = appts_res.data if appts_res.data else []
-    except Exception:
-        all_appts = []
-
-    horse_map = {h["id"]: h for h in horses}
-
-    col_d1, col_d2 = st.columns([1, 2])
-
-    with col_d1:
-        st.subheader("Select Run-Sheet Date")
-        selected_run_date = st.date_input(
-            "Dispatch Date", datetime.date.today(), key="run_date_picker"
-        )
-        day_of_week = selected_run_date.strftime("%A")
-        corridor_match = {
-            "Monday": "Ottawa Metro & Russell Home Corridor",
-            "Tuesday": "Kingston Corridor (South - Hwy 416/401)",
-            "Wednesday": "Pembroke & Upper Valley Corridor (North - Hwy 17)",
-            "Thursday": "Montreal Corridor (East - Hwy 417)",
-            "Friday": "Flagship Barn Dedicated Intensive",
-        }.get(day_of_week, "Custom / Weekend Route")
-        st.info(f"📍 **Scheduled Corridor:** {corridor_match}")
-
-    with col_d2:
-        daily_appts = [
-            a
-            for a in all_appts
-            if a.get("appointment_date") == str(selected_run_date)
-        ]
-        st.subheader(
-            f"Daily Stop Itinerary: {selected_run_date.strftime('%b %d, %Y')}"
-            f" ({len(daily_appts)} Stops)"
-        )
-
-        if daily_appts:
-            for idx, appt in enumerate(daily_appts, start=1):
-                h_info = horse_map.get(appt.get("horse_id"), {})
-                b_info = h_info.get("barn_details", {})
-                with st.container():
-                    c_s1, c_s2 = st.columns([3, 1])
-                    with c_s1:
-                        st.markdown(
-                            f"**Stop {idx}: {h_info.get('name', 'Horse')}** (Owner:"
-                            f" {h_info.get('owner_name', 'N/A')})"
-                        )
-                        st.caption(
-                            f"📍 Facility: **{b_info.get('name', 'Barn')}** | Distance:"
-                            f" {appt.get('distance_from_base_km', 0)} km | Fee:"
-                            f" ${float(appt.get('travel_fee', 0)):.2f}"
-                        )
-                    with c_s2:
-                        new_status = st.selectbox(
-                            "Status",
-                            [
-                                "Tentative",
-                                "Confirmed",
-                                "En Route",
-                                "Completed",
-                                "Rescheduled",
-                            ],
-                            index=[
-                                "Tentative",
-                                "Confirmed",
-                                "En Route",
-                                "Completed",
-                                "Rescheduled",
-                            ].index(appt.get("status", "Confirmed"))
-                            if appt.get("status")
-                            in [
-                                "Tentative",
-                                "Confirmed",
-                                "En Route",
-                                "Completed",
-                                "Rescheduled",
-                            ]
-                            else 1,
-                            key=f"status_select_{appt['id']}",
-                        )
-                        if new_status != appt.get("status"):
-                            supabase.table("appointments").update(
-                                {"status": new_status}
-                            ).eq("id", appt["id"]).execute()
-                            st.rerun()
-                    st.divider()
-
-            run_sheet_df = pd.DataFrame([
-                {
-                    "Stop": i + 1,
-                    "Horse": horse_map.get(a.get("horse_id"), {}).get("name", ""),
-                    "Owner": horse_map.get(a.get("horse_id"), {}).get(
-                        "owner_name", ""
-                    ),
-                    "Barn / Facility": horse_map.get(a.get("horse_id"), {})
-                    .get("barn_details", {})
-                    .get("name", ""),
-                    "Distance (km)": a.get("distance_from_base_km", 0),
-                    "Travel Fee": f"${float(a.get('travel_fee', 0)):.2f}",
-                    "Status": a.get("status", "Confirmed"),
-                }
-                for i, a in enumerate(daily_appts)
-            ])
-
-            csv_sheet = run_sheet_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="📥 Export Daily Dispatch Run-Sheet (CSV)",
-                data=csv_sheet,
-                file_name=f"EquusOS_RunSheet_{selected_run_date}.csv",
-                mime="text/csv",
-            )
-        else:
-            st.info(
-                "No appointments booked for"
-                f" {selected_run_date.strftime('%A, %B %d, %Y')}."
-            )
-
-# ----------------------------------------------------
-# 4. SMART ROUTE BOOKING & MILEAGE
-# ----------------------------------------------------
-elif page == "Smart Route Booking & Mileage":
-    st.title("Smart Route Corridor Dispatcher")
-    st.markdown(
-        "Optimize travel routes and automatically calculate mileage fees outside"
-        " the 30km radius."
-    )
-
-    col1, col2 = st.columns(2)
-    with col1:
-        with st.form("booking_form"):
-            st.subheader("Book Confirmed Route Appointment")
-            if horses:
-                horse_opts = {
-                    f"{h['name']} ({h['barn_details']['name']})": h for h in horses
-                }
-                h_choice = st.selectbox("Select Horse", list(horse_opts.keys()))
-                chosen_horse = horse_opts[h_choice]
-
-                app_date = st.date_input("Appointment Date", datetime.date.today())
-                distance = st.number_input(
-                    "Estimated Distance from Base (km)",
-                    min_value=0.0,
-                    value=35.0,
-                    step=1.0,
-                )
-
-                if st.form_submit_button("Confirm Booking"):
-                    try:
-                        barn_id_val = chosen_horse.get("barn_id")
-                        query = (
-                            supabase.table("appointments")
-                            .select("id")
-                            .eq("appointment_date", str(app_date))
-                        )
-                        if barn_id_val:
-                            query = query.eq("barn_id", str(barn_id_val))
-
-                        appts_res = query.execute()
-                        same_day_count = (len(appts_res.data) if appts_res.data else 0) + 1
-                        travel_fee, is_waived, reason = calculate_travel_fee(
-                            float(distance), same_day_count
-                        )
-
-                        payload = {
-                            "appointment_date": str(app_date),
-                            "horse_id": str(chosen_horse["id"]),
-                            "distance_from_base_km": float(distance),
-                            "travel_fee": float(travel_fee),
-                            "status": "Confirmed",
-                        }
-                        if barn_id_val:
-                            payload["barn_id"] = str(barn_id_val)
-
-                        supabase.table("appointments").insert(payload).execute()
-                        st.success(
-                            "Appointment Confirmed! Travel Fee:"
-                            f" ${travel_fee:.2f} CAD ({reason})"
-                        )
-                        st.rerun()
-                    except Exception as err:
-                        st.error(f"Booking Error: {err}")
-
-    with col2:
-        st.subheader("Designated Corridor Days")
-        st.info("""
-        * **Monday:** Ottawa Metro & Russell Home Base
-        * **Tuesday:** Kingston Corridor (South)
-        * **Wednesday:** Pembroke / Valley Corridor (North)
-        * **Thursday:** Montreal Corridor (East)
-        * **Friday:** Flagship Barn Dedicated Intensive
-        """)
-
-# ----------------------------------------------------
-# 5. LANDING PAGE & PRICING CONTENT CMS
-# ----------------------------------------------------
-elif page == "Landing Page & Pricing CMS":
-    st.title("🌐 Landing Page Content & Pricing Editor")
-    st.markdown(
-        "Edit headlines, therapy session pricing, service descriptions,"
-        " promotional banners, and corridor routes live on your landing page."
-    )
-
-    with st.form("cms_editor_form"):
-        st.subheader("1. Announcement Banner & Main Headlines")
-        c_banner = st.text_input(
-            "Top Announcement Banner (Leave blank to hide)",
-            value=site_content.get("announcement_banner", ""),
-        )
-        col_h1, col_h2 = st.columns(2)
-        with col_h1:
-            c_hero_t = st.text_input(
-                "Hero Main Title", value=site_content.get("hero_title", "")
-            )
-            c_badge1 = st.text_input(
-                "Badge 1", value=site_content.get("hero_badge_1", "")
-            )
-            c_badge2 = st.text_input(
-                "Badge 2", value=site_content.get("hero_badge_2", "")
-            )
-        with col_h2:
-            c_hero_sub = st.text_input(
-                "Hero Subtitle", value=site_content.get("hero_subtitle", "")
-            )
-            c_badge3 = st.text_input(
-                "Badge 3", value=site_content.get("hero_badge_3", "")
-            )
-
-        st.divider()
-
-        st.subheader("2. Equitron-Pro (HECT) Content & Pricing")
-        col_ec1, col_ec2 = st.columns(2)
-        with col_ec1:
-            c_hect_t = st.text_input(
-                "Equitron Title", value=site_content.get("hect_title", "")
-            )
-            c_hect_p = st.text_input(
-                "Equitron Price Headline", value=site_content.get("hect_price", "")
-            )
-            c_hect_d = st.text_area(
-                "Equitron Overview Description",
-                value=site_content.get("hect_desc", ""),
-                height=100,
-            )
-        with col_ec2:
-            c_hect_b1 = st.text_input(
-                "Equitron Bullet 1", value=site_content.get("hect_bullet_1", "")
-            )
-            c_hect_b2 = st.text_input(
-                "Equitron Bullet 2", value=site_content.get("hect_bullet_2", "")
-            )
-            c_hect_b3 = st.text_input(
-                "Equitron Bullet 3", value=site_content.get("hect_bullet_3", "")
-            )
-
-        st.divider()
-
-        st.subheader("3. HaloEQ2 (Halotherapy) Content & Pricing")
-        col_hc1, col_hc2 = st.columns(2)
-        with col_hc1:
-            c_halo_t = st.text_input(
-                "HaloEQ2 Title", value=site_content.get("halo_title", "")
-            )
-            c_halo_p = st.text_input(
-                "HaloEQ2 Price Headline", value=site_content.get("halo_price", "")
-            )
-            c_halo_d = st.text_area(
-                "HaloEQ2 Overview Description",
-                value=site_content.get("halo_desc", ""),
-                height=100,
-            )
-        with col_hc2:
-            c_halo_b1 = st.text_input(
-                "HaloEQ2 Bullet 1", value=site_content.get("halo_bullet_1", "")
-            )
-            c_halo_b2 = st.text_input(
-                "HaloEQ2 Bullet 2", value=site_content.get("halo_bullet_2", "")
-            )
-            c_halo_b3 = st.text_input(
-                "HaloEQ2 Bullet 3", value=site_content.get("halo_bullet_3", "")
-            )
-
-        st.divider()
-
-        st.subheader("4. Corridor Routes & Travel Days")
-        c_corridors = st.text_area(
-            "Regional Corridor Schedule (Markdown Bullet Points)",
-            value=site_content.get("corridor_routes", ""),
-            height=130,
-        )
-
-        if st.form_submit_button(
-            "💾 Save & Publish Changes Live to Landing Page",
-            use_container_width=True,
-        ):
-            updated_payload = {
-                "announcement_banner": c_banner,
-                "hero_title": c_hero_t,
-                "hero_subtitle": c_hero_sub,
-                "hero_badge_1": c_badge1,
-                "hero_badge_2": c_badge2,
-                "hero_badge_3": c_badge3,
-                "hect_title": c_hect_t,
-                "hect_price": c_hect_p,
-                "hect_desc": c_hect_d,
-                "hect_bullet_1": c_hect_b1,
-                "hect_bullet_2": c_hect_b2,
-                "hect_bullet_3": c_hect_b3,
-                "halo_title": c_halo_t,
-                "halo_price": c_halo_p,
-                "halo_desc": c_halo_d,
-                "halo_bullet_1": c_halo_b1,
-                "halo_bullet_2": c_halo_b2,
-                "halo_bullet_3": c_halo_b3,
-                "corridor_routes": c_corridors,
-            }
-            ok, msg = update_site_content(updated_payload)
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
-
-# ----------------------------------------------------
-# 6. USER DATABASE & ACCESS MANAGEMENT
-# ----------------------------------------------------
-elif page == "User Database & Credentials":
-    st.title("👥 User Database & Access Management")
-    st.markdown(
-        "View all registered user accounts, reset passwords, change user roles,"
-        " and provision admin or clinician credentials."
-    )
-
-    try:
-        users_res = (
-            supabase.table("app_users").select("*").order("created_at", desc=True).execute()
-        )
-        all_app_users = users_res.data if users_res.data else []
-    except Exception:
-        all_app_users = []
-
-    col_u1, col_u2 = st.columns([1, 1])
-
-    with col_u1:
-        with st.expander("➕ Provision New User Account", expanded=True):
-            with st.form("create_app_user_form"):
-                u_name = st.text_input("Full Name*")
-                u_email = st.text_input("Email Address (Username)*")
-                u_pwd = st.text_input("Temporary Password*", type="password")
-                u_role = st.selectbox(
-                    "Role", ["Client", "Admin", "Clinician Associate"]
-                )
-                u_phone = st.text_input("Phone Number")
-
-                if st.form_submit_button("Create Database User"):
-                    if u_name and u_email and u_pwd:
-                        ok, msg = register_db_user(
-                            u_email, u_pwd, u_name, role=u_role, phone=u_phone
-                        )
-                        if ok:
-                            st.success(f"Created {u_role} account for {u_name} ({u_email})!")
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                    else:
-                        st.warning("Please fill in all required fields.")
-
-    with col_u2:
-        with st.expander("🔑 Reset User Password / Change Status", expanded=True):
-            if all_app_users:
-                user_dict = {
-                    f"{u['full_name']} ({u['email']}) - [{u['role']}]": u
-                    for u in all_app_users
-                }
-                sel_u_label = st.selectbox(
-                    "Select User Account", list(user_dict.keys())
-                )
-                target_u = user_dict[sel_u_label]
-
-                with st.form("admin_pwd_reset_form"):
-                    new_u_pwd = st.text_input("Set New Password", type="password")
-                    new_u_status = st.selectbox(
-                        "Account Status",
-                        ["active", "suspended"],
-                        index=0 if target_u.get("status") == "active" else 1,
-                    )
-                    new_u_role = st.selectbox(
-                        "Assign Role",
-                        ["Client", "Admin", "Clinician Associate"],
-                        index=[
-                            "Client",
-                            "Admin",
-                            "Clinician Associate",
-                        ].index(target_u.get("role", "Client")),
-                    )
-
-                    if st.form_submit_button("Update User Credentials"):
-                        try:
-                            update_payload = {"status": new_u_status, "role": new_u_role}
-                            if new_u_pwd:
-                                update_payload["password_hash"] = hash_password(new_u_pwd)
-
-                            supabase.table("app_users").update(update_payload).eq(
-                                "id", target_u["id"]
-                            ).execute()
-                            st.success(f"Updated account for {target_u['full_name']}!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error updating user: {e}")
-            else:
-                st.info("No app users registered in the database yet.")
-
-    st.subheader("Registered App Users & Roles")
-    if all_app_users:
-        user_table = [
-            {
-                "Full Name": u.get("full_name"),
-                "Email / Username": u.get("email"),
-                "Role": u.get("role"),
-                "Phone": u.get("phone", ""),
-                "Status": (
-                    "🟢 Active" if u.get("status") == "active" else "🔴 Suspended"
-                ),
-                "Created Date": str(u.get("created_at", ""))[:10],
-            }
-            for u in all_app_users
-        ]
-        st.dataframe(pd.DataFrame(user_table), use_container_width=True)
-
-# ----------------------------------------------------
-# 7. MANAGE CLIENTS & APPOINTMENTS
-# ----------------------------------------------------
-elif page == "Manage Clients & Appointments":
-    st.title("👥 Master Client Profile & Booking Manager")
-    st.markdown(
-        "Manage client profiles, book sessions on their behalf, and cancel or"
-        " reschedule visits."
-    )
-
-    try:
-        w_res = (
-            supabase.table("client_waivers")
-            .select("*")
-            .order("created_at", desc=True)
-            .execute()
-        )
-        all_clients = w_res.data if w_res.data else []
-    except Exception:
-        all_clients = []
-
-    client_lookup = {
-        f"{c['owner_name']} ({c['client_email']}) - Horse: {c['horse_name']}": c
-        for c in all_clients
-    }
-
-    if client_lookup:
-        col_m1, col_m2 = st.columns([1, 1])
-
-        with col_m1:
-            st.subheader("1. Edit Client Details & Manage Profile")
-            sel_client_lbl = st.selectbox("Select Client", list(client_lookup.keys()))
-            active_c = client_lookup[sel_client_lbl]
-
-            with st.form("edit_client_form"):
-                new_owner = st.text_input(
-                    "Owner Name", value=active_c.get("owner_name", "")
-                )
-                new_email = st.text_input(
-                    "Email Address", value=active_c.get("client_email", "")
-                )
-                new_vet = st.text_input(
-                    "Primary Veterinarian",
-                    value=active_c.get("primary_veterinarian", ""),
-                )
-                new_phone = st.text_input(
-                    "Vet Phone", value=active_c.get("vet_phone", "")
-                )
-
-                if st.form_submit_button("Save Updated Client Info"):
-                    try:
-                        supabase.table("client_waivers").update({
-                            "owner_name": new_owner,
-                            "client_email": new_email,
-                            "primary_veterinarian": new_vet,
-                            "vet_phone": new_phone,
-                        }).eq("id", active_c["id"]).execute()
-                        st.success("Client information updated successfully!")
-                        st.rerun()
-                    except Exception as ex:
-                        st.error(f"Error updating: {ex}")
-
-        with col_m2:
-            st.subheader("2. Book / Reschedule / Cancel for Client")
-            client_horse_match = next(
-                (
-                    h
-                    for h in horses
-                    if h.get("name", "").lower()
-                    == active_c.get("horse_name", "").lower()
-                ),
-                None,
-            )
-
-            with st.form("paige_booking_client_form"):
-                bk_date = st.date_input("Appointment Date", datetime.date.today())
-                bk_dist = st.number_input(
-                    "Distance from Base (km)", min_value=0.0, value=30.0, step=5.0
-                )
-                bk_action = st.selectbox(
-                    "Action", ["Book Confirmed Appointment", "Cancel Existing Booking"]
-                )
-
-                if st.form_submit_button("Execute Appointment Action"):
-                    if client_horse_match:
-                        if bk_action == "Book Confirmed Appointment":
-                            try:
-                                supabase.table("appointments").insert({
-                                    "appointment_date": str(bk_date),
-                                    "horse_id": str(client_horse_match["id"]),
-                                    "barn_id": str(client_horse_match.get("barn_id")),
-                                    "distance_from_base_km": float(bk_dist),
-                                    "travel_fee": (
-                                        0.0
-                                        if bk_dist <= 30
-                                        else round((bk_dist - 30) * 0.73, 2)
-                                    ),
-                                    "status": "Confirmed",
-                                }).execute()
-                                st.success(
-                                    "Booked confirmed session for"
-                                    f" {client_horse_match['name']} on {bk_date}!"
-                                )
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error: {e}")
-                        else:
-                            try:
-                                supabase.table("appointments").delete().eq(
-                                    "horse_id", str(client_horse_match["id"])
-                                ).eq("appointment_date", str(bk_date)).execute()
-                                st.warning(
-                                    f"Cancelled appointment for {client_horse_match['name']} on"
-                                    f" {bk_date}."
-                                )
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error cancelling: {e}")
-                    else:
-                        st.error("Horse profile not found in database.")
-    else:
-        st.info("No registered clients found in the database.")
-
-# ----------------------------------------------------
-# 8. PUBLIC INTAKE & BARN QR CODE
-# ----------------------------------------------------
-elif page == "Public Intake & Barn QR Code":
-    st.title("📲 Public Self-Serve Intake & Barn QR Generator")
-    st.markdown(
-        "Generate printable QR codes and shareable onboarding links for horse"
-        " owners to access the portal on their smartphones."
-    )
-
-    col_q1, col_q2 = st.columns([1, 1])
-
-    with col_q1:
-        st.subheader("Generate Barn QR Code")
-        app_base_url = st.text_input(
-            "Your Streamlit App URL", value="https://equusos.streamlit.app"
-        )
-        intake_url = f"{app_base_url.rstrip('/')}"
-        st.info(f"🔗 **Public Member Portal URL:** `{intake_url}`")
-        encoded_url = urllib.parse.quote(intake_url)
-        qr_image_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={encoded_url}&bgcolor=ffffff&color=1e293b&margin=10"
-        st.image(
-            qr_image_url,
-            caption="Scan to open member portal & intake",
-            width=250,
-        )
-
-    with col_q2:
-        st.subheader("Printable Barn Notice Preview")
-        st.markdown(
-            f"""
-        <div style="border: 2px solid #334155; border-radius: 12px; padding: 24px; text-align: center; background-color: #f8fafc; color: #0f172a;">
-            <h2 style="margin: 0; color: #0f172a;">🐎 EQUUS PERFORMANCE</h2>
-            <p style="margin: 4px 0 16px 0; font-size: 14px; color: #64748b;">CELLULAR REGENERATION & HALOTHERAPY</p>
-            <hr style="border: 0; height: 1px; background: #cbd5e1; margin-bottom: 16px;">
-            <p style="font-weight: bold; margin-bottom: 12px;">Scan to Access Client Portal & Registration</p>
-            <img src="{qr_image_url}" width="180" style="border-radius: 8px; margin-bottom: 12px;"/>
-            <p style="font-size: 12px; color: #475569;">Or visit: <br><code>{intake_url}</code></p>
-            <p style="font-size: 11px; color: #94a3b8; margin-top: 12px;">Equus Performance Therapeutics | Paige Cummings</p>
-        </div>
-        """,
-            unsafe_allow_html=True,
-        )
-
-# ----------------------------------------------------
-# 9. SIGNED WAIVERS & ONBOARDING
-# ----------------------------------------------------
-elif page == "Signed Waivers & Onboarding":
-    st.title("Client Onboarding & Legal Liability Waiver")
-    st.markdown(
-        "New clients must complete this intake form and execute the liability"
-        " acknowledgment prior to receiving treatment."
-    )
-
-    with st.form("client_waiver_form"):
-        st.subheader("1. Owner & Horse Details")
-        col_w1, col_w2 = st.columns(2)
-        with col_w1:
-            owner_name = st.text_input("Owner Full Name")
-            client_email = st.text_input("Email Address")
-            horse_name = st.text_input("Horse Competition Name")
-        with col_w2:
-            primary_vet = st.text_input("Primary Veterinarian Name")
-            vet_phone = st.text_input("Veterinarian Contact Number")
-
-        st.subheader("2. Modality Consent Selection")
-        consent_hect = st.checkbox(
-            "Consent for High-Energy Cell Treatment (Equitron-Pro / HECT)"
-        )
-        consent_halo = st.checkbox(
-            "Consent for Clinical Dry Salt Halotherapy (HaloEQ2)"
-        )
-
-        st.subheader("3. Terms & Liability Acknowledgment")
-        st.markdown("""
-        > **Scope of Practice & Release of Liability:**  
-        > Equus Performance Therapeutics provides non-invasive complementary equine wellness, cellular regeneration, and respiratory recovery support. These services do not replace formal veterinary diagnosis, medicine, or surgery. The undersigned owner confirms that the animal is free of acute, contagious infectious diseases, and releases Paige Cummings and Equus Performance Therapeutics from liability arising from complementary therapy applications.
-        """)
-
-        waiver_agreed = st.checkbox(
-            "I have read, understood, and agree to the terms of service and"
-            " liability waiver."
-        )
-        signature_name = st.text_input("Electronic Signature (Type Full Legal Name)")
-
-        if st.form_submit_button("Submit Intake & Signed Waiver"):
-            if owner_name and client_email and horse_name and signature_name:
-                if not waiver_agreed:
-                    st.error(
-                        "You must check the waiver agreement box to complete onboarding."
-                    )
-                else:
-                    try:
-                        modalities_chosen = []
-                        if consent_hect:
-                            modalities_chosen.append("Equitron-Pro (HECT)")
-                        if consent_halo:
-                            modalities_chosen.append("HaloEQ2 (Halotherapy)")
-
-                        supabase.table("client_waivers").insert({
-                            "owner_name": owner_name,
-                            "client_email": client_email,
-                            "horse_name": horse_name,
-                            "primary_veterinarian": primary_vet,
-                            "vet_phone": vet_phone,
-                            "modality_consent": modalities_chosen,
-                            "waiver_agreed": waiver_agreed,
-                            "signature_name": signature_name,
-                        }).execute()
-
-                        st.success(
-                            "Waiver successfully executed and archived for"
-                            f" {horse_name} (Owner: {owner_name})!"
-                        )
-                    except Exception as e:
-                        st.error(f"Error saving waiver: {e}")
-            else:
-                st.warning(
-                    "Please fill in all required contact fields and provide your"
-                    " electronic signature."
-                )
-
-# ----------------------------------------------------
-# 10. FACILITY RETAINERS & RECONCILIATION
-# ----------------------------------------------------
-elif page == "Facility Retainers & Reconciliation":
-    st.title("🏛️ Facility Retainer & Intensive Reconciliation")
-    st.markdown(
-        "Manage facility partner contracts, monitor promotional minute"
-        " allowances vs. standard overages, and generate master facility"
-        " statements."
-    )
-
-    if barns:
-        barn_pick = {b["name"]: b for b in barns}
-        chosen_bname = st.selectbox("Select Partner Facility", list(barn_pick.keys()))
-        chosen_b = barn_pick[chosen_bname]
-
-        f_horses = [h for h in horses if h.get("barn_id") == chosen_b["id"]]
-        f_horse_ids = [h["id"] for h in f_horses]
-
-        try:
-            all_l_res = supabase.table("treatment_logs").select("*").execute()
-            all_l = all_l_res.data if all_l_res.data else []
-            facility_l = [l for l in all_l if l.get("horse_id") in f_horse_ids]
-        except Exception:
-            facility_l = []
-
-        mktg_horses = [h for h in f_horses if h.get("is_marketing_tier", False)]
-        tot_mins = sum(int(l.get("duration_minutes", 0)) for l in facility_l)
-        tot_billed = sum(float(l.get("calculated_fee", 0)) for l in facility_l)
-
-        waived_promo_mins = sum(
-            min(int(mh.get("minutes_used_this_month", 0)), 200) for mh in mktg_horses
-        )
-        waived_promo_value = waived_promo_mins * 2.0
-
-        c_b1, c_b2, c_b3, c_b4 = st.columns(4)
-        c_b1.metric("Active Stabled Horses", len(f_horses))
-        c_b2.metric("Total Facility Therapy", f"{tot_mins:,} Mins")
-        c_b3.metric("Waived Promo Value", f"${waived_promo_value:,.2f} CAD")
-        c_b4.metric("Net Facility Billable", f"${tot_billed:,.2f} CAD")
-
-        st.divider()
-        recon_rows = []
-        for h in f_horses:
-            h_used = int(h.get("minutes_used_this_month", 0))
-            is_mktg = h.get("is_marketing_tier", False)
-            h_logs = [l for l in facility_l if l.get("horse_id") == h["id"]]
-            h_billed = sum(float(l.get("calculated_fee", 0)) for l in h_logs)
-            waived_for_h = (min(h_used, 200) * 2.0) if is_mktg else 0.0
-
-            recon_rows.append({
-                "Horse Name": h.get("name", "Unknown"),
-                "Owner": h.get("owner_name", "Unknown"),
-                "Tier": (
-                    "🌟 Marketing Promo Tier (200 Free Mins)"
-                    if is_mktg
-                    else "Standard Tier ($1.00 Baseline)"
-                ),
-                "Minutes Used": h_used,
-                "Waived Promo": f"${waived_for_h:.2f}",
-                "Total Billable": f"${h_billed:.2f}",
-            })
-
-        if recon_rows:
-            st.dataframe(pd.DataFrame(recon_rows), use_container_width=True)
-            facility_pdf_bytes = create_facility_reconciliation_pdf(
-                chosen_b, recon_rows, tot_billed, waived_promo_value
-            )
-            st.download_button(
-                label=(
-                    "📄 Export Master Facility Retainer & Reconciliation Statement"
-                    " (PDF)"
-                ),
-                data=bytes(facility_pdf_bytes),
-                file_name=(
-                    f"EquusOS_Facility_Statement_{chosen_bname.replace(' ', '_')}_{datetime.date.today()}.pdf"
-                ),
-                mime="application/pdf",
-            )
-    else:
-        st.info("No facilities registered.")
-
-# ----------------------------------------------------
-# 11. PRE-PAID PACKAGES & CREDIT PASSES
-# ----------------------------------------------------
-elif page == "Pre-Paid Packages & Credit Passes":
-    st.title("🎟️ Pre-Paid Multi-Session Packages & Passes")
-    st.markdown(
-        "Manage pre-paid treatment bundles, track punch-card credit balances, and"
-        " redeem session credits."
-    )
-
-    try:
-        pkg_res = (
-            supabase.table("client_packages")
-            .select("*")
-            .order("created_at", desc=True)
-            .execute()
-        )
-        all_packages = pkg_res.data if pkg_res.data else []
-    except Exception:
-        all_packages = []
-
-    horse_map = {h["id"]: h for h in horses}
-    col_pk1, col_pk2 = st.columns([1, 1])
-
-    with col_pk1:
-        with st.expander("➕ Enroll Client in Multi-Session Package", expanded=True):
-            if horses:
-                with st.form("new_package_form"):
-                    horse_picker_pkg = {
-                        f"{h['name']} ({h['owner_name']})": h for h in horses
-                    }
-                    chosen_hpkg = st.selectbox(
-                        "Select Horse", list(horse_picker_pkg.keys())
-                    )
-                    target_h = horse_picker_pkg[chosen_hpkg]
-
-                    pkg_type = st.selectbox("Package Tier", [
-                        "5-Session Equitron Rehab Pack ($275 CAD)",
-                        "10-Session Performance Maintenance Pack ($520 CAD)",
-                        "5-Session HaloEQ2 Pulmonary Reset ($225 CAD)",
-                        "3-Session Acute Injury Intensive ($165 CAD)",
-                    ])
-                    default_credits = (
-                        10
-                        if "10-Session" in pkg_type
-                        else (3 if "3-Session" in pkg_type else 5)
-                    )
-                    default_price = (
-                        520.0
-                        if "10-Session" in pkg_type
-                        else (165.0 if "3-Session" in pkg_type else 275.0)
-                    )
-
-                    c_credits = st.number_input(
-                        "Total Credits in Pass",
-                        min_value=1,
-                        max_value=50,
-                        value=default_credits,
-                    )
-                    c_price = st.number_input(
-                        "Package Price (CAD)",
-                        min_value=0.0,
-                        step=25.0,
-                        value=default_price,
-                    )
-                    p_status = st.selectbox(
-                        "Payment Status", ["Paid via e-Transfer", "Pending Payment"]
-                    )
-                    pkg_notes = st.text_area("Pass Notes / Terms")
-
-                    if st.form_submit_button("Create Pre-Paid Package"):
-                        try:
-                            supabase.table("client_packages").insert({
-                                "owner_name": target_h.get("owner_name", "Unknown"),
-                                "horse_id": str(target_h["id"]),
-                                "package_name": pkg_type,
-                                "total_credits": int(c_credits),
-                                "remaining_credits": int(c_credits),
-                                "package_price": float(c_price),
-                                "payment_status": p_status,
-                                "notes": pkg_notes,
-                            }).execute()
-                            st.success(
-                                f"Package created for {target_h['name']} with {c_credits}"
-                                " credits!"
-                            )
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error creating package: {e}")
-            else:
-                st.info("Please register a horse profile first.")
-
-    with col_pk2:
-        with st.expander("⚡ 1-Click Credit Redemption", expanded=True):
-            active_packages = [
-                p for p in all_packages if int(p.get("remaining_credits", 0)) > 0
-            ]
-            if active_packages:
-                pkg_options = {
-                    f"{p.get('package_name')} -"
-                    f" {horse_map.get(p.get('horse_id'), {}).get('name', 'Horse')}"
-                    f" ({p.get('remaining_credits')}/{p.get('total_credits')} Credits"
-                    " Left)": p
-                    for p in active_packages
-                }
-                sel_pkg_label = st.selectbox(
-                    "Select Active Package to Redeem", list(pkg_options.keys())
-                )
-                chosen_pkg = pkg_options[sel_pkg_label]
-
-                if st.button("✅ Redeem 1 Pre-Paid Session Credit"):
-                    new_balance = int(chosen_pkg.get("remaining_credits", 1)) - 1
-                    supabase.table("client_packages").update(
-                        {"remaining_credits": new_balance}
-                    ).eq("id", chosen_pkg["id"]).execute()
-                    st.success(
-                        f"Redeemed 1 credit! New balance: {new_balance} credits remaining."
-                    )
-                    st.rerun()
-            else:
-                st.write("No active pre-paid packages with remaining credits.")
-
-# ----------------------------------------------------
-# 12. TRAINER & REFERRAL INCENTIVES
-# ----------------------------------------------------
-elif page == "Trainer & Referral Incentives":
-    st.title("🤝 Trainer & Barn Manager Referral Incentives")
-    st.markdown(
-        "Track referring coaches, barn managers, and veterinary advocates."
-    )
-
-    try:
-        ref_res = (
-            supabase.table("referral_partners")
-            .select("*")
-            .order("created_at", desc=True)
-            .execute()
-        )
-        referral_partners = ref_res.data if ref_res.data else []
-    except Exception:
-        referral_partners = []
-
-    try:
-        ref_logs_res = (
-            supabase.table("referral_commissions")
-            .select("*")
-            .order("created_at", desc=True)
-            .execute()
-        )
-        ref_commissions = ref_logs_res.data if ref_logs_res.data else []
-    except Exception:
-        ref_commissions = []
-
-    col_rf1, col_rf2 = st.columns([1, 1])
-
-    with col_rf1:
-        with st.expander("➕ Register Referral Partner / Coach", expanded=True):
-            with st.form("add_partner_form"):
-                p_name = st.text_input("Partner / Trainer Full Name*")
-                p_role = st.selectbox("Role", [
-                    "Head Trainer / Coach",
-                    "Barn Manager",
-                    "Veterinarian",
-                    "Equine Bodyworker / Farrier",
-                    "Client Advocate",
-                ])
-                p_email = st.text_input(
-                    "Email Address", placeholder="trainer@barn.ca"
-                )
-                p_phone = st.text_input("Phone Number")
-                rew_type = st.selectbox("Incentive Type", [
-                    "Cash Split (10% of Referred Billings)",
-                    "Comped Session Credits (1 Free 20-min Session per 5 Referred)",
-                    "Fixed Referral Fee ($15 per New Client)",
-                ])
-                p_notes = st.text_area("Partnership Notes")
-
-                if st.form_submit_button("Save Referral Partner"):
-                    if p_name:
-                        supabase.table("referral_partners").insert({
-                            "partner_name": p_name,
-                            "role": p_role,
-                            "email": p_email,
-                            "phone": p_phone,
-                            "incentive_type": rew_type,
-                            "notes": p_notes,
-                        }).execute()
-                        st.success(f"Registered referral partner: {p_name}!")
-                        st.rerun()
-
-    with col_rf2:
-        with st.expander("🎯 Log Client Referral & Compute Payout", expanded=True):
-            if referral_partners and horses:
-                with st.form("log_referral_form"):
-                    partner_lookup = {
-                        f"{p['partner_name']} ({p['role']})": p for p in referral_partners
-                    }
-                    sel_p = st.selectbox(
-                        "Referring Partner", list(partner_lookup.keys())
-                    )
-                    chosen_partner = partner_lookup[sel_p]
-
-                    horse_lookup_ref = {
-                        f"{h['name']} (Owner: {h['owner_name']})": h for h in horses
-                    }
-                    sel_h = st.selectbox(
-                        "Referred Equine Client", list(horse_lookup_ref.keys())
-                    )
-                    chosen_h = horse_lookup_ref[sel_h]
-
-                    ref_date = st.date_input("Referral Date", datetime.date.today())
-                    session_rev = st.number_input(
-                        "Session Value / Package Billed ($)",
-                        min_value=0.0,
-                        value=60.0,
-                        step=10.0,
-                    )
-
-                    earned_amount = (
-                        round(session_rev * 0.10, 2)
-                        if "10%" in chosen_partner.get("incentive_type", "")
-                        else 15.00
-                    )
-                    earned_credits = (
-                        1 if "Comped" in chosen_partner.get("incentive_type", "") else 0
-                    )
-                    ref_notes = st.text_input("Notes / Payout Ref")
-
-                    if st.form_submit_button("Record Referral Credit"):
-                        supabase.table("referral_commissions").insert({
-                            "partner_id": chosen_partner["id"],
-                            "horse_id": chosen_h["id"],
-                            "referral_date": str(ref_date),
-                            "session_value": float(session_rev),
-                            "commission_amount": float(earned_amount),
-                            "earned_credits": int(earned_credits),
-                            "payout_status": "Pending",
-                            "notes": ref_notes,
-                        }).execute()
-                        st.success(
-                            "Logged referral commission for"
-                            f" {chosen_partner['partner_name']}!"
-                        )
-                        st.rerun()
-
-# ----------------------------------------------------
-# 13. ACCOUNTS PAYABLE (A/P) BILLS
-# ----------------------------------------------------
-elif page == "Accounts Payable (A/P) Bills":
-    st.title("📑 Accounts Payable (A/P) & Vendor Bills")
-    st.markdown(
-        "Track supplier invoices, operating payables, bill due dates, payment"
-        " records, and Input Tax Credits (ITCs)."
-    )
-
-    try:
-        bills_res = (
-            supabase.table("vendor_bills").select("*").order("due_date").execute()
-        )
-        all_bills = bills_res.data if bills_res.data else []
-    except Exception:
-        all_bills = []
-
-    total_ap_outstanding = sum(
-        float(b.get("total_amount", 0)) - float(b.get("amount_paid", 0))
-        for b in all_bills
-        if b.get("status") != "Paid"
-    )
-    total_ap_paid = sum(float(b.get("amount_paid", 0)) for b in all_bills)
-    total_itc_tax = sum(float(b.get("tax_hst", 0)) for b in all_bills)
-
-    c_ap1, c_ap2, c_ap3 = st.columns(3)
-    c_ap1.metric(
-        "Outstanding Accounts Payable",
-        f"${total_ap_outstanding:,.2f} CAD",
-        delta=(
-            f"-${total_ap_outstanding:,.2f}"
-            if total_ap_outstanding > 0
-            else "All Bills Paid"
-        ),
-        delta_color="inverse",
-    )
-    c_ap2.metric("Total Vendor Bills Settled", f"${total_ap_paid:,.2f} CAD")
-    c_ap3.metric("Eligible HST/GST Tax Credits (ITCs)", f"${total_itc_tax:,.2f} CAD")
-
-    col_b1, col_b2 = st.columns([1, 1])
-
-    with col_b1:
-        with st.expander("➕ Enter New Vendor Bill", expanded=True):
-            with st.form("new_vendor_bill_form"):
-                v_name = st.text_input(
-                    "Vendor / Supplier Name*",
-                    placeholder="e.g. Equitron Canada, Shell, Salt Co.",
-                )
-                v_inv_no = st.text_input("Invoice / Bill #", placeholder="INV-2026-08")
-                v_date = st.date_input("Bill Date", datetime.date.today())
-                v_due = st.date_input(
-                    "Due Date", datetime.date.today() + datetime.timedelta(days=30)
-                )
-                v_cat = st.selectbox("Expense Category / Account", [
-                    "5010 - Vehicle Fuel & Travel Expense",
-                    "5020 - Vehicle Maintenance & Repairs",
-                    "5030 - Equipment Sinking Fund & Maintenance",
-                    "5040 - Consumables & Clinical Supplies",
-                    "5050 - Insurance (Commercial & Equine Liability)",
-                    "5060 - Marketing, Software & Technology",
-                    "5070 - Professional Fees & Accounting",
-                    "1510 - Capital Asset (Equipment Purchase)",
-                ])
-                v_sub = st.number_input(
-                    "Subtotal Amount ($ CAD)", min_value=0.0, step=10.0, value=100.0
-                )
-                v_tax = st.number_input(
-                    "HST / Tax Paid ($ CAD - 13% ON)",
-                    min_value=0.0,
-                    step=1.0,
-                    value=round(v_sub * 0.13, 2),
-                )
-                v_tot = v_sub + v_tax
-                st.caption(f"**Total Bill Amount:** ${v_tot:.2f} CAD")
-                v_notes = st.text_area("Bill Description / Notes")
-
-                if st.form_submit_button("Save Vendor Bill to A/P"):
-                    if v_name and v_tot > 0:
-                        supabase.table("vendor_bills").insert({
-                            "vendor_name": v_name,
-                            "bill_number": v_inv_no,
-                            "bill_date": str(v_date),
-                            "due_date": str(v_due),
-                            "category": v_cat.split(" - ")[1],
-                            "account_code": v_cat.split(" - ")[0],
-                            "subtotal": float(v_sub),
-                            "tax_hst": float(v_tax),
-                            "total_amount": float(v_tot),
-                            "amount_paid": 0.0,
-                            "status": "Unpaid",
-                            "notes": v_notes,
-                        }).execute()
-                        st.success(f"Vendor bill from {v_name} recorded!")
-                        st.rerun()
-
-    with col_b2:
-        with st.expander("💳 1-Click Pay Vendor Bill", expanded=True):
-            unpaid_bills = [b for b in all_bills if b.get("status") != "Paid"]
-            if unpaid_bills:
-                bill_opts = {
-                    f"{b['vendor_name']} (Due: {b['due_date']}) - Rem:"
-                    f" ${float(b['total_amount']) - float(b['amount_paid']):.2f} CAD": b
-                    for b in unpaid_bills
-                }
-                sel_b_label = st.selectbox("Select Bill to Pay", list(bill_opts.keys()))
-                target_b = bill_opts[sel_b_label]
-                rem_bal = float(target_b["total_amount"]) - float(
-                    target_b["amount_paid"]
-                )
-
-                with st.form("pay_bill_form"):
-                    p_amt = st.number_input(
-                        "Payment Amount ($ CAD)",
-                        min_value=1.0,
-                        max_value=rem_bal,
-                        value=rem_bal,
-                        step=10.0,
-                    )
-                    p_method = st.selectbox(
-                        "Payment Method", ["e-Transfer", "Credit Card", "Cheque", "Debit"]
-                    )
-                    p_ref = st.text_input("Confirmation / Cheque #")
-                    p_dt = st.date_input("Payment Date", datetime.date.today())
-
-                    if st.form_submit_button("Execute Bill Payment"):
-                        supabase.table("vendor_payments").insert({
-                            "bill_id": target_b["id"],
-                            "payment_date": str(p_dt),
-                            "payment_method": p_method,
-                            "amount_paid": float(p_amt),
-                            "reference_number": p_ref,
-                            "notes": f"Paid {p_method} ref: {p_ref}",
-                        }).execute()
-
-                        new_paid = float(target_b["amount_paid"]) + float(p_amt)
-                        new_status = (
-                            "Paid"
-                            if new_paid >= float(target_b["total_amount"])
-                            else "Partially Paid"
-                        )
-                        supabase.table("vendor_bills").update(
-                            {"amount_paid": new_paid, "status": new_status}
-                        ).eq("id", target_b["id"]).execute()
-                        st.success(
-                            f"Payment of ${p_amt:.2f} applied to"
-                            f" {target_b['vendor_name']}!"
-                        )
-                        st.rerun()
-            else:
-                st.info("No unpaid vendor bills pending in A/P.")
-
-# ----------------------------------------------------
-# 14. ACCOUNTS RECEIVABLE (A/R) AGING
-# ----------------------------------------------------
-elif page == "Accounts Receivable (A/R) Aging":
-    st.title("📈 Accounts Receivable (A/R) & Aging Summary")
-    st.markdown(
-        "Monitor outstanding client balances and aging schedules (Current, 1-30,"
-        " 31-60, 61-90, 90+ days)."
-    )
-
-    try:
-        logs_res = supabase.table("treatment_logs").select("*").execute()
-        all_logs = logs_res.data if logs_res.data else []
-    except Exception:
-        all_logs = []
-
-    try:
-        pmts_res = supabase.table("client_payments").select("*").execute()
-        all_pmts = pmts_res.data if pmts_res.data else []
-    except Exception:
-        all_pmts = []
-
-    horse_id_to_owner = {h["id"]: h.get("owner_name", "Unknown") for h in horses}
-    owners = sorted(
-        list(
-            set(
-                [h.get("owner_name") for h in horses if h.get("owner_name")]
-                + [p.get("owner_name") for p in all_pmts]
-            )
-        )
-    )
-
-    total_billed = sum(float(l.get("calculated_fee", 0)) for l in all_logs)
-    total_received = sum(float(p.get("amount_paid", 0)) for p in all_pmts)
-    total_ar = total_billed - total_received
-
-    c_ar1, c_ar2, c_ar3 = st.columns(3)
-    c_ar1.metric("Total Invoiced", f"${total_billed:,.2f} CAD")
-    c_ar2.metric("Total Collected", f"${total_received:,.2f} CAD")
-    c_ar3.metric(
-        "Net A/R Balance Outstanding",
-        f"${total_ar:,.2f} CAD",
-        delta=f"-${total_ar:,.2f}" if total_ar > 0 else "All Accounts Current",
-        delta_color="inverse",
-    )
-
-    st.subheader("Client A/R Aging Analysis Schedule")
-    aging_rows = []
-    today = datetime.date.today()
-
-    for o in owners:
-        o_logs = [
-            l for l in all_logs if horse_id_to_owner.get(l.get("horse_id")) == o
-        ]
-        o_billed = sum(float(l.get("calculated_fee", 0)) for l in o_logs)
-        o_paid = sum(
-            float(p.get("amount_paid", 0))
-            for p in all_pmts
-            if p.get("owner_name") == o
-        )
-        o_balance = o_billed - o_paid
-
-        cur_amt, d1_30, d31_60, d61_90, d90_plus = 0.0, 0.0, 0.0, 0.0, 0.0
-        if o_balance > 0:
-            if o_logs:
-                oldest_date_str = str(o_logs[-1].get("created_at", ""))[:10]
+    st.markdown("<h2 style='text-align: center;'>📊 AIA Canada Media Monitor Access Portal</h2>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        with st.form("login_form"):
+            st.markdown("### Account Authentication")
+            login_email = st.text_input("Corporate Email Address")
+            login_password = st.text_input("Password", type="password")
+            submit_login = st.form_submit_button("Authenticate Sign-In", use_container_width=True)
+            
+            if submit_login:
                 try:
-                    oldest_date = datetime.datetime.strptime(
-                        oldest_date_str, "%Y-%m-%d"
-                    ).date()
-                    age_days = (today - oldest_date).days
-                except Exception:
-                    age_days = 0
+                    res = supabase.auth.sign_in_with_password({"email": login_email, "password": login_password})
+                    st.session_state["auth_user"] = res.user
+                    
+                    role_query = supabase.table("monitor_users").select("user_role, full_name").eq("user_id", res.user.id).execute()
+                    if role_query.data:
+                        st.session_state["user_role"] = role_query.data[0]["user_role"]
+                        st.session_state["user_full_name"] = role_query.data[0]["full_name"]
+                    else:
+                        st.session_state["user_role"] = "Viewer"
+                        st.session_state["user_full_name"] = res.user.email
+                        
+                    st.success(f"Access authorized as {st.session_state['user_role']}!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as login_err:
+                    st.error(f"Authentication Failed: {login_err}")
+    st.stop()
 
-                if age_days <= 0:
-                    cur_amt = o_balance
-                elif age_days <= 30:
-                    d1_30 = o_balance
-                elif age_days <= 60:
-                    d31_60 = o_balance
-                elif age_days <= 90:
-                    d61_90 = o_balance
-                else:
-                    d90_plus = o_balance
-            else:
-                cur_amt = o_balance
+USER_ROLE = st.session_state["user_role"]
+IS_ADMIN = USER_ROLE == "Administrator"
+IS_MANAGER = USER_ROLE == "Editor"  
+IS_VIEWER = USER_ROLE == "Viewer"
 
-        aging_rows.append({
-            "Client / Owner": o,
-            "Total Invoiced": f"${o_billed:,.2f}",
-            "Total Paid": f"${o_paid:,.2f}",
-            "Current Due": f"${cur_amt:,.2f}",
-            "1 - 30 Days": f"${d1_30:,.2f}",
-            "31 - 60 Days": f"${d31_60:,.2f}",
-            "61 - 90 Days": f"${d61_90:,.2f}",
-            "90+ Days Overdue": f"${d90_plus:,.2f}",
-            "Total Balance": f"${o_balance:,.2f}",
-            "Status": "✅ Paid in Full" if o_balance <= 0 else "⚠️ Overdue",
+def load_active_team_users():
+    try:
+        res = supabase.table("monitor_users").select("full_name").order("full_name").execute()
+        return ["Unassigned"] + [row["full_name"] for row in res.data]
+    except Exception:
+        return ["Unassigned", "Brian Beehler", "Emily Chung"]
+
+TEAM_USERS = load_active_team_users()
+
+# --- NEW GLOBAL CONTACT LOADER ---
+def load_media_contacts():
+    try:
+        res = supabase.table("media_contacts").select("id, full_name, outlet").order("full_name").execute()
+        return res.data if res.data else []
+    except Exception:
+        return []
+
+MEDIA_CONTACTS = load_media_contacts()
+CONTACT_NAMES = ["Unassigned", "➕ Add New Contact..."] + [f"{c['full_name']} ({c['outlet']})" for c in MEDIA_CONTACTS]
+CONTACT_MAP = {f"{c['full_name']} ({c['outlet']})": c['id'] for c in MEDIA_CONTACTS}
+
+# --- GLOBAL UTILITY OPERATIONS ---
+def delete_mention_record(record_id):
+    try:
+        supabase.table("mentions").delete().eq("id", record_id).execute()
+        st.toast("Mention successfully removed from index!")
+    except Exception as e:
+        st.error(f"Deletion failed: {e}")
+
+def add_action_note(mention_id, note_text, user):
+    if note_text.strip():
+        try:
+            supabase.table("mention_actions").insert({
+                "mention_id": mention_id,
+                "action_note": note_text,
+                "performed_by": user
+            }).execute()
+            st.toast("Action log note saved successfully!")
+        except Exception as e:
+            st.error(f"Failed to record note: {e}")
+
+def send_assignment_notification(mention_id, mention_title, recipient, sender, message):
+    if recipient and recipient != "Unassigned":
+        final_message = message if message.strip() else "Please review this newly assigned mention."
+        try:
+            supabase.table("notifications").insert({
+                "recipient_name": recipient,
+                "sender_name": sender,
+                "mention_id": mention_id,
+                "mention_title": mention_title,
+                "message": final_message
+            }).execute()
+        except Exception as e:
+            st.error(f"Failed to send notification: {e}")
+
+
+def get_app_record_url(mention_id):
+    """Return an absolute internal record URL when APP_BASE_URL is configured."""
+    base_url = st.secrets.get("APP_BASE_URL", "").strip().rstrip("/")
+    if base_url:
+        return f"{base_url}/?mention_id={mention_id}"
+    return f"/?mention_id={mention_id}"
+
+
+@st.cache_data(ttl=300)
+def load_registered_email_recipients():
+    """Load registered application users with valid tracking email addresses."""
+    try:
+        response = (
+            supabase.table("monitor_users")
+            .select("full_name, tracking_email, user_role")
+            .not_.is_("tracking_email", "null")
+            .order("full_name")
+            .execute()
+        )
+    except Exception as exc:
+        st.warning(f"Could not load registered email recipients: {exc}")
+        return []
+
+    recipients = []
+    seen_emails = set()
+
+    for row in response.data or []:
+        email = str(row.get("tracking_email") or "").strip()
+        if not email or email.lower() in seen_emails:
+            continue
+
+        seen_emails.add(email.lower())
+        full_name = row.get("full_name") or email
+        role = row.get("user_role") or "User"
+        recipients.append({
+            "label": f"{full_name} ({role})",
+            "email": email,
         })
 
-    if aging_rows:
-        df_aging = pd.DataFrame(aging_rows)
-        st.dataframe(df_aging, use_container_width=True)
-        csv_ar = df_aging.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="📥 Export A/R Aging Schedule (CSV)",
-            data=csv_ar,
-            file_name=f"EquusOS_AR_Aging_Report_{datetime.date.today()}.csv",
-            mime="text/csv",
-        )
+    return recipients
 
-# ----------------------------------------------------
-# 15. HST / SALES TAX & CRA ITC REPORT
-# ----------------------------------------------------
-elif page == "HST / Sales Tax (CRA ITC Report)":
-    st.title("🏛️ Canadian HST / GST & Input Tax Credit (ITC) Report")
-    st.markdown(
-        "Track sales tax collected on therapeutic services and corridor travel"
-        " against ITCs paid on business expenses for CRA filings."
+
+def build_mention_email_body(mention, additional_message=""):
+    """Build the plain-text body used by the email share link."""
+    brands = mention.get("brands_affected") or []
+    brand_text = ", ".join(brands) if isinstance(brands, list) else str(brands)
+    introduction = (
+        f"{additional_message.strip()}\n\n" if additional_message.strip() else ""
     )
 
-    try:
-        logs_res = (
-            supabase.table("treatment_logs").select("calculated_fee").execute()
-        )
-        gross_therapy = (
-            sum(float(l.get("calculated_fee", 0)) for l in logs_res.data)
-            if logs_res.data
-            else 0.0
-        )
-    except Exception:
-        gross_therapy = 0.0
+    return f"""{introduction}AIA Canada Media Mention
 
-    try:
-        appts_res = supabase.table("appointments").select("travel_fee").execute()
-        gross_travel = (
-            sum(float(a.get("travel_fee", 0)) for a in appts_res.data)
-            if appts_res.data
-            else 0.0
-        )
-    except Exception:
-        gross_travel = 0.0
+Title: {mention.get("title") or "Untitled"}
+Outlet: {mention.get("outlet_platform") or "Unknown"}
+Published: {mention.get("date_published") or "Unknown"}
+Assigned to: {mention.get("assigned_to_user") or "Unassigned"}
+Brand(s) affected: {brand_text or "Not specified"}
+Theme: {mention.get("theme") or "Not specified"}
+Sentiment: {mention.get("sentiment_category") or "Unknown"}
+Sentiment score: {mention.get("sentiment_score") if mention.get("sentiment_score") is not None else "N/A"}
+Alert level: {mention.get("alert_level") or "Not set"}
+Recommendation: {mention.get("recommendation") or "Not set"}
 
-    try:
-        bills_res = (
-            supabase.table("vendor_bills").select("subtotal, tax_hst").execute()
-        )
-        vendor_tax_itcs = (
-            sum(float(b.get("tax_hst", 0)) for b in bills_res.data)
-            if bills_res.data
-            else 0.0
-        )
-    except Exception:
-        vendor_tax_itcs = 0.0
+AI recommendation:
+{mention.get("ai_action_recommendation") or "Not available"}
 
-    tax_rate = st.sidebar.number_input(
-        "Tax Rate (%) - Default Ontario HST",
-        min_value=0.0,
-        max_value=25.0,
-        value=13.0,
-        step=1.0,
-    )
-    taxable_revenue = gross_therapy + gross_travel
-    hst_collected = round(taxable_revenue * (tax_rate / 100.0), 2)
-    itcs_paid = round(vendor_tax_itcs, 2)
-    net_tax_remittance = hst_collected - itcs_paid
+Summary:
+{mention.get("snippet") or "No summary available."}
 
-    c_tx1, c_tx2, c_tx3 = st.columns(3)
-    c_tx1.metric(
-        f"HST Collected on Sales ({tax_rate}%)", f"${hst_collected:,.2f} CAD"
-    )
-    c_tx2.metric("Input Tax Credits (ITCs Paid)", f"${itcs_paid:,.2f} CAD")
-    c_tx3.metric(
-        "Net Remittance to CRA",
-        f"${net_tax_remittance:,.2f} CAD",
-        delta=(
-            f"${net_tax_remittance:.2f}"
-            if net_tax_remittance >= 0
-            else "CRA Refund Due"
-        ),
-        delta_color="normal" if net_tax_remittance >= 0 else "inverse",
+Read article:
+{mention.get("url") or "Not available"}
+
+Open app workspace:
+{get_app_record_url(mention.get("id", ""))}
+"""
+
+
+def build_mailto_url(mention, recipients, additional_message=""):
+    """Build a mailto URL for Outlook or the user's default email client."""
+    subject = f"AIA Canada Media Mention: {mention.get('title') or 'Untitled'}"
+    body = build_mention_email_body(mention, additional_message)
+
+    clean_recipients = []
+    seen_emails = set()
+    for email in recipients:
+        normalized_email = str(email or "").strip()
+        if not normalized_email or normalized_email.lower() in seen_emails:
+            continue
+        seen_emails.add(normalized_email.lower())
+        clean_recipients.append(normalized_email)
+
+    recipient_string = ",".join(clean_recipients)
+
+    return (
+        f"mailto:{quote(recipient_string, safe='@,')}"
+        f"?subject={quote(subject)}"
+        f"&body={quote(body)}"
     )
 
-    st.subheader("CRA Sales Tax Breakdown Ledger")
-    tax_summary_data = [
-        {
-            "CRA Line Item": "Line 101 - Total Sales & Revenue",
-            "Amount (CAD)": f"${taxable_revenue:,.2f}",
-        },
-        {
-            "CRA Line Item": (
-                "Line 105 - Total HST/GST Collected or Collectible"
+
+def mark_mention_for_daily_report(mention_id, report_date, shared_by):
+    """Mark a mention for explicit inclusion in a selected daily report."""
+    shared_at = datetime.now().astimezone().isoformat()
+
+    (
+        supabase.table("mentions")
+        .update({
+            "include_in_daily_report": True,
+            "daily_report_date": report_date.isoformat(),
+            "last_shared_at": shared_at,
+            "last_shared_by": shared_by,
+        })
+        .eq("id", mention_id)
+        .execute()
+    )
+
+    (
+        supabase.table("mention_actions")
+        .insert({
+            "mention_id": mention_id,
+            "action_note": (
+                f"Marked for the {report_date.isoformat()} daily media report "
+                "and prepared for email sharing."
             ),
-            "Amount (CAD)": f"${hst_collected:,.2f}",
-        },
-        {
-            "CRA Line Item": (
-                "Line 108 - Total Input Tax Credits (ITCs on Purchases)"
-            ),
-            "Amount (CAD)": f"-${itcs_paid:,.2f}",
-        },
-        {
-            "CRA Line Item": "Line 109 - Net Tax Payable / (Refund Eligible)",
-            "Amount (CAD)": f"${net_tax_remittance:,.2f}",
-        },
+            "performed_by": shared_by,
+        })
+        .execute()
+    )
+
+
+def render_share_mention_controls(mention, key_prefix):
+    """Render registered-user email and daily-report inclusion controls."""
+    st.markdown("#### 📧 Share Mention")
+
+    registered_recipients = load_registered_email_recipients()
+    recipient_map = {
+        recipient["label"]: recipient["email"]
+        for recipient in registered_recipients
+    }
+
+    assigned_owner = mention.get("assigned_to_user")
+    default_recipient_labels = [
+        label
+        for label in recipient_map
+        if assigned_owner
+        and label.startswith(f"{assigned_owner} (")
     ]
-    st.dataframe(pd.DataFrame(tax_summary_data), use_container_width=True)
 
-# ----------------------------------------------------
-# 16. CHART OF ACCOUNTS & GENERAL LEDGER
-# ----------------------------------------------------
-elif page == "Chart of Accounts & General Ledger":
-    st.title("📚 Chart of Accounts & General Ledger")
-    st.markdown(
-        "Standard double-entry chart of accounts structuring Assets (1000s),"
-        " Liabilities (2000s), Equity (3000s), Revenue (4000s), and Expenses"
-        " (5000s)."
+    selected_recipient_labels = st.multiselect(
+        "Select registered recipients",
+        options=list(recipient_map.keys()),
+        default=default_recipient_labels,
+        placeholder="Select one or more registered users",
+        key=f"{key_prefix}_registered_recipients",
     )
 
+    selected_recipient_emails = [
+        recipient_map[label]
+        for label in selected_recipient_labels
+    ]
+
+    additional_recipient_text = st.text_input(
+        "Additional email addresses",
+        placeholder="external@example.com, another@example.com",
+        key=f"{key_prefix}_additional_recipients",
+        help="Optional. Separate multiple addresses with commas or semicolons.",
+    )
+    additional_recipient_emails = [
+        email.strip()
+        for email in additional_recipient_text.replace(";", ",").split(",")
+        if email.strip()
+    ]
+    all_recipient_emails = (
+        selected_recipient_emails + additional_recipient_emails
+    )
+
+    existing_report_date = mention.get("daily_report_date")
+    default_report_date = datetime.now().date()
+    if existing_report_date:
+        try:
+            default_report_date = datetime.fromisoformat(
+                str(existing_report_date)
+            ).date()
+        except ValueError:
+            pass
+
+    report_date = st.date_input(
+        "Include in daily media report for",
+        value=default_report_date,
+        key=f"{key_prefix}_report_date",
+    )
+    additional_message = st.text_area(
+        "Optional email introduction",
+        placeholder="Please review this media mention.",
+        height=90,
+        key=f"{key_prefix}_message",
+    )
+
+    if selected_recipient_emails:
+        st.caption(
+            "Selected recipients: "
+            + ", ".join(selected_recipient_emails)
+        )
+
+    if mention.get("include_in_daily_report"):
+        st.info(
+            "This mention is already marked for the "
+            f"{mention.get('daily_report_date') or 'selected'} daily report."
+        )
+
+    if st.button(
+        "Mark for Daily Report & Prepare Email",
+        type="primary",
+        use_container_width=True,
+        key=f"{key_prefix}_prepare",
+        disabled=IS_VIEWER,
+    ):
+        if not all_recipient_emails:
+            st.error("Select at least one registered recipient or enter an additional email address.")
+        else:
+            try:
+                current_user = (
+                    st.session_state.get("user_full_name")
+                    or "Unknown user"
+                )
+                mark_mention_for_daily_report(
+                    mention_id=mention["id"],
+                    report_date=report_date,
+                    shared_by=current_user,
+                )
+                st.session_state[f"{key_prefix}_mailto"] = build_mailto_url(
+                    mention=mention,
+                    recipients=all_recipient_emails,
+                    additional_message=additional_message,
+                )
+                st.success(
+                    f"Mention added to the {report_date.isoformat()} daily report."
+                )
+            except Exception as exc:
+                st.error(f"Unable to prepare the mention for sharing: {exc}")
+
+    mailto_url = st.session_state.get(f"{key_prefix}_mailto")
+    if mailto_url:
+        st.link_button(
+            "Open Email in Outlook",
+            mailto_url,
+            use_container_width=True,
+        )
+        st.caption(
+            "The selected registered users are added to the recipient field. "
+            "This opens the computer's default email application."
+        )
+
+
+def load_daily_report_mentions(target_date):
+    """Return eligible mentions inserted or explicitly included for a report date."""
+    start_iso = datetime.combine(target_date, datetime.min.time()).isoformat()
+    end_iso = datetime.combine(target_date, datetime.max.time()).isoformat()
+
+    selected_fields = (
+        "id, title, url, outlet_platform, theme, status, recommendation, "
+        "brands_affected, alert_level, assigned_to_user, date_published, "
+        "inserted_at, sentiment_category, sentiment_score, sentiment_rationale, "
+        "ai_action_recommendation, naming_error_flag, data_conflict_flag, "
+        "data_conflict_details, include_in_daily_report, daily_report_date"
+    )
+
+    inserted_response = (
+        supabase.table("mentions")
+        .select(selected_fields)
+        .gte("inserted_at", start_iso)
+        .lte("inserted_at", end_iso)
+        .neq("status", "noise")
+        .execute()
+    )
+
+    included_response = (
+        supabase.table("mentions")
+        .select(selected_fields)
+        .eq("include_in_daily_report", True)
+        .eq("daily_report_date", target_date.isoformat())
+        .neq("status", "noise")
+        .execute()
+    )
+
+    unique_mentions = {}
+
+    for mention in (inserted_response.data or []) + (included_response.data or []):
+        status = str(mention.get("status") or "").strip().lower()
+        recommendation = str(
+            mention.get("recommendation") or ""
+        ).strip().lower()
+
+        sentiment_rationale = str(
+            mention.get("sentiment_rationale") or ""
+        ).strip().lower()
+        ai_recommendation = str(
+            mention.get("ai_action_recommendation") or ""
+        ).strip().lower()
+
+        is_noise = (
+            status == "noise"
+            or recommendation == "ignore"
+            or sentiment_rationale.startswith("suppressed noise")
+            or "suppressed noise" in sentiment_rationale
+            or ai_recommendation == "ignore"
+        )
+
+        if is_noise:
+            continue
+
+        unique_mentions[mention["id"]] = mention
+
+    return list(unique_mentions.values())
+
+
+@st.cache_data(ttl=300)
+def load_auth_login_status():
+    """Return Supabase Auth login metadata keyed by user ID."""
     try:
-        coa_res = (
-            supabase.table("chart_of_accounts")
-            .select("*")
-            .order("account_code")
+        admin_client = create_client(
+            st.secrets["SUPABASE_URL"],
+            st.secrets["SUPABASE_SERVICE_ROLE_KEY"],
+        )
+        response = admin_client.auth.admin.list_users(page=1, per_page=1000)
+
+        if isinstance(response, list):
+            auth_users = response
+        else:
+            auth_users = getattr(response, "users", [])
+
+        return {
+            str(user.id): {
+                "email": getattr(user, "email", None),
+                "created_at": getattr(user, "created_at", None),
+                "last_sign_in_at": getattr(user, "last_sign_in_at", None),
+                "confirmed_at": getattr(user, "confirmed_at", None),
+            }
+            for user in auth_users
+        }
+    except Exception as exc:
+        st.error(f"Unable to load authentication activity: {exc}")
+        return {}
+
+
+def format_auth_timestamp(value):
+    """Format a Supabase Auth timestamp for display."""
+    if not value:
+        return "Not recorded"
+
+    try:
+        parsed = pd.to_datetime(value, utc=True)
+        return parsed.tz_convert("America/Toronto").strftime("%Y-%m-%d %I:%M %p %Z")
+    except Exception:
+        return str(value)
+
+
+
+# --- ASK AIA MEDIA DATABASE HELPERS ---
+ASK_AIA_TABLES = {
+    "mentions": {"date_field": "inserted_at", "order_field": "inserted_at"},
+    "mention_actions": {"date_field": "inserted_at", "order_field": "inserted_at"},
+    "media_contacts": {"date_field": None, "order_field": "full_name"},
+    "media_inquiries": {"date_field": "inserted_at", "order_field": "inserted_at"},
+    "inquiry_actions": {"date_field": "inserted_at", "order_field": "inserted_at"},
+    "monitor_users": {"date_field": None, "order_field": "full_name"},
+    "monitor_keywords": {"date_field": None, "order_field": "term"},
+    "monitor_templates": {"date_field": None, "order_field": "template_name"},
+    "notifications": {"date_field": "created_at", "order_field": "created_at"},
+}
+
+
+def fetch_all_table_rows(
+    table_name: str,
+    order_field: str | None = None,
+    date_field: str | None = None,
+    start_iso: str | None = None,
+    end_iso: str | None = None,
+    page_size: int = 1000,
+) -> list[dict[str, Any]]:
+    """Fetch every matching row and field from a Supabase table."""
+    rows: list[dict[str, Any]] = []
+    start_index = 0
+
+    while True:
+        end_index = start_index + page_size - 1
+        query = supabase.table(table_name).select("*")
+
+        if date_field and start_iso:
+            query = query.gte(date_field, start_iso)
+        if date_field and end_iso:
+            query = query.lte(date_field, end_iso)
+        if order_field:
+            query = query.order(order_field, desc=True)
+
+        response = query.range(start_index, end_index).execute()
+        page_rows = response.data or []
+        rows.extend(page_rows)
+
+        if len(page_rows) < page_size:
+            break
+
+        start_index += page_size
+
+    return rows
+
+
+def load_complete_ask_aia_context(
+    use_date_filter: bool,
+    start_date,
+    end_date,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
+    """Load all fields from all application tables, with optional date filtering."""
+    if use_date_filter:
+        start_iso = datetime.combine(start_date, datetime_time.min).astimezone().isoformat()
+        end_iso = datetime.combine(end_date, datetime_time.max).astimezone().isoformat()
+    else:
+        start_iso = None
+        end_iso = None
+
+    database_context: dict[str, list[dict[str, Any]]] = {}
+    table_errors: dict[str, str] = {}
+
+    for table_name, configuration in ASK_AIA_TABLES.items():
+        try:
+            database_context[table_name] = fetch_all_table_rows(
+                table_name=table_name,
+                order_field=configuration["order_field"],
+                date_field=configuration["date_field"],
+                start_iso=start_iso,
+                end_iso=end_iso,
+            )
+        except Exception as exc:
+            database_context[table_name] = []
+            table_errors[table_name] = str(exc)
+
+    return database_context, table_errors
+
+
+def split_database_context(
+    database_context: dict[str, list[dict[str, Any]]],
+    maximum_characters: int = 120_000,
+) -> list[str]:
+    """Split complete database content into model-safe JSON batches."""
+    chunks: list[str] = []
+    current_records: list[dict[str, Any]] = []
+    current_size = 0
+
+    for table_name, rows in database_context.items():
+        if not rows:
+            wrapped_record = {
+                "table": table_name,
+                "record": None,
+                "message": "No matching records.",
+            }
+            encoded = json.dumps(wrapped_record, default=str)
+
+            if current_records and current_size + len(encoded) > maximum_characters:
+                chunks.append(json.dumps(current_records, default=str))
+                current_records = []
+                current_size = 0
+
+            current_records.append(wrapped_record)
+            current_size += len(encoded)
+            continue
+
+        for row in rows:
+            wrapped_record = {"table": table_name, "record": row}
+            encoded = json.dumps(wrapped_record, default=str)
+
+            if current_records and current_size + len(encoded) > maximum_characters:
+                chunks.append(json.dumps(current_records, default=str))
+                current_records = []
+                current_size = 0
+
+            current_records.append(wrapped_record)
+            current_size += len(encoded)
+
+    if current_records:
+        chunks.append(json.dumps(current_records, default=str))
+
+    return chunks
+
+
+def analyse_database_chunk(
+    user_question: str,
+    chunk_text: str,
+    chunk_number: int,
+    total_chunks: int,
+) -> str:
+    """Extract question-relevant evidence from one complete database batch."""
+    extraction_instruction = """
+You are an evidence extraction system for AIA Canada's media-monitoring database.
+
+Review every supplied record and every supplied field.
+
+Rules:
+1. Extract only facts relevant to the user's question.
+2. Do not invent facts or infer unsupported intent.
+3. Preserve exact IDs, names, dates, statuses, scores, recommendations and relationships.
+4. Match related records using id, mention_id, inquiry_id, contact_id,
+   author_contact_id and user_id.
+5. Distinguish date_published from inserted_at and created_at.
+6. Include conflicting, missing or incomplete values when they affect the answer.
+7. State plainly when the batch contains no relevant evidence.
+8. Never expose passwords, API keys, access tokens or service-role keys.
+9. Keep the extraction compact without omitting relevant evidence.
+"""
+
+    response = ai_client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=(
+            f"User question:\n{user_question}\n\n"
+            f"Database batch {chunk_number} of {total_chunks}:\n{chunk_text}"
+        ),
+        config=types.GenerateContentConfig(system_instruction=extraction_instruction),
+    )
+    return response.text
+
+
+def generate_final_ask_aia_answer(
+    user_question: str,
+    extracted_evidence: list[str],
+    table_counts: dict[str, int],
+    table_errors: dict[str, str],
+    date_scope: str,
+) -> str:
+    """Create one final answer from evidence extracted from every database batch."""
+    synthesis_instruction = """
+You are the internal media-monitoring data analyst for AIA Canada.
+
+Answer the user's question using only the extracted database evidence.
+
+Rules:
+1. Do not invent facts.
+2. State clearly when the records do not contain enough information.
+3. Reconcile related records using their IDs.
+4. Distinguish publication dates from insertion and creation dates.
+5. Include relevant counts, owners, contacts, actions, recommendations,
+   statuses, sentiment values and source records.
+6. State the date scope used.
+7. When useful, identify the source table and record ID.
+8. Mention any table that could not be read if that limitation affects the answer.
+9. Keep the response clear, operational and concise.
+10. Never expose passwords, API keys, access tokens or service-role keys.
+"""
+
+    evidence_text = "\n\n".join(
+        f"Evidence batch {index + 1}:\n{evidence}"
+        for index, evidence in enumerate(extracted_evidence)
+    )
+
+    response = ai_client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=(
+            f"User question:\n{user_question}\n\n"
+            f"Date scope:\n{date_scope}\n\n"
+            f"Rows reviewed by table:\n{json.dumps(table_counts, indent=2)}\n\n"
+            f"Table read errors:\n{json.dumps(table_errors, indent=2)}\n\n"
+            f"Evidence from all database batches:\n{evidence_text}"
+        ),
+        config=types.GenerateContentConfig(system_instruction=synthesis_instruction),
+    )
+    return response.text
+
+
+
+def remove_existing_executive_summary(report_text):
+    """Remove an AI-generated executive summary before adding the required one."""
+    if not report_text:
+        return ""
+
+    pattern = re.compile(
+        r"^\s*#{1,3}\s*Executive Summary\s*\n+.*?"
+        r"(?=\n#{1,3}\s+|\Z)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cleaned_text = pattern.sub("", report_text, count=1).strip()
+    return cleaned_text or report_text.strip()
+
+
+
+def calculate_percentage_change(current_value: float, previous_value: float):
+    """Return percentage change, using None when no valid baseline exists."""
+    if previous_value == 0:
+        return None if current_value == 0 else float("inf")
+    return ((current_value - previous_value) / previous_value) * 100
+
+
+def format_metric_delta(current_value: float, previous_value: float, suffix: str = "") -> str:
+    """Format a Streamlit metric delta."""
+    difference = current_value - previous_value
+    if isinstance(current_value, float) or isinstance(previous_value, float):
+        return f"{difference:+.2f}{suffix}"
+    return f"{difference:+}{suffix}"
+
+
+def fetch_reportable_mentions(start_date, end_date) -> list[dict]:
+    """Fetch non-noise, non-ignored mentions by database insertion date."""
+    start_iso = datetime.combine(start_date, datetime.min.time()).isoformat()
+    end_iso = datetime.combine(end_date, datetime.max.time()).isoformat()
+
+    response = (
+        supabase.table("mentions")
+        .select(
+            "id, title, snippet, url, outlet_platform, theme, status, "
+            "recommendation, brands_affected, alert_level, assigned_to_user, "
+            "date_published, inserted_at, sentiment_category, sentiment_score, "
+            "naming_error_flag, data_conflict_flag, data_conflict_details, "
+            "ai_action_recommendation"
+        )
+        .gte("inserted_at", start_iso)
+        .lte("inserted_at", end_iso)
+        .neq("status", "noise")
+        .neq("recommendation", "ignore")
+        .order("inserted_at")
+        .execute()
+    )
+
+    return [
+        record
+        for record in (response.data or [])
+        if str(record.get("status") or "").strip().lower() != "noise"
+        and str(record.get("recommendation") or "").strip().lower() != "ignore"
+        and "suppressed noise"
+        not in str(record.get("sentiment_rationale") or "").strip().lower()
+    ]
+
+
+def load_monitoring_keywords() -> list[dict]:
+    """Load configured monitoring keywords for quantitative matching."""
+    try:
+        response = (
+            supabase.table("monitor_keywords")
+            .select("term, brand_tags, theme_layer")
+            .order("term")
             .execute()
         )
-        all_accounts = coa_res.data if coa_res.data else []
+        return response.data or []
     except Exception:
-        all_accounts = []
+        return []
 
-    col_coa1, col_coa2 = st.columns([1, 2])
 
-    with col_coa1:
-        with st.expander("➕ Add New Account to Ledger", expanded=True):
-            with st.form("new_coa_form"):
-                a_code = st.text_input("Account Code (e.g. 5080)")
-                a_name = st.text_input("Account Name")
-                a_type = st.selectbox(
-                    "Account Type",
-                    ["Asset", "Liability", "Equity", "Revenue", "Expense"],
+def normalize_sentiment_category(value) -> str:
+    """Normalize sentiment labels for consistent reporting."""
+    normalized = str(value or "Unknown").strip().title()
+    allowed = {"Positive", "Neutral", "Negative", "Mixed"}
+    return normalized if normalized in allowed else "Unknown"
+
+
+def records_to_weekly_dataframe(records: list[dict]) -> pd.DataFrame:
+    """Convert mention records into a normalized analytical dataframe."""
+    if not records:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(records)
+    frame["inserted_at"] = pd.to_datetime(frame["inserted_at"], errors="coerce", utc=True)
+    frame["insert_date"] = frame["inserted_at"].dt.date
+    frame["sentiment_category"] = frame["sentiment_category"].apply(
+        normalize_sentiment_category
+    )
+    frame["sentiment_score"] = pd.to_numeric(
+        frame["sentiment_score"], errors="coerce"
+    ).fillna(0.0)
+    frame["alert_level"] = frame["alert_level"].fillna("Not set")
+    frame["outlet_platform"] = frame["outlet_platform"].fillna("Unknown")
+    frame["theme"] = frame["theme"].fillna("Unclassified")
+    return frame
+
+
+def count_keyword_mentions(
+    records: list[dict],
+    keyword_rows: list[dict],
+) -> dict[str, int]:
+    """Count records containing each configured keyword."""
+    counts: dict[str, int] = {}
+
+    for keyword_row in keyword_rows:
+        term = str(keyword_row.get("term") or "").strip()
+        if not term:
+            continue
+
+        normalized_term = term.casefold()
+        count = 0
+
+        for record in records:
+            searchable_values = [
+                record.get("title"),
+                record.get("snippet"),
+                record.get("theme"),
+                " ".join(record.get("brands_affected") or []),
+            ]
+            searchable_text = " ".join(
+                str(value) for value in searchable_values if value
+            ).casefold()
+
+            if normalized_term in searchable_text:
+                count += 1
+
+        counts[term] = count
+
+    return counts
+
+
+def build_weekly_quantitative_package(
+    current_records: list[dict],
+    previous_records: list[dict],
+    keyword_rows: list[dict],
+    current_start,
+    current_end,
+    previous_start,
+    previous_end,
+) -> dict:
+    """Build measured week-over-week reporting data."""
+    current_df = records_to_weekly_dataframe(current_records)
+    previous_df = records_to_weekly_dataframe(previous_records)
+
+    current_volume = len(current_df)
+    previous_volume = len(previous_df)
+
+    current_average_sentiment = (
+        float(current_df["sentiment_score"].mean()) if current_volume else 0.0
+    )
+    previous_average_sentiment = (
+        float(previous_df["sentiment_score"].mean()) if previous_volume else 0.0
+    )
+
+    current_positive = (
+        int((current_df["sentiment_category"] == "Positive").sum())
+        if current_volume
+        else 0
+    )
+    previous_positive = (
+        int((previous_df["sentiment_category"] == "Positive").sum())
+        if previous_volume
+        else 0
+    )
+
+    current_negative = (
+        int((current_df["sentiment_category"] == "Negative").sum())
+        if current_volume
+        else 0
+    )
+    previous_negative = (
+        int((previous_df["sentiment_category"] == "Negative").sum())
+        if previous_volume
+        else 0
+    )
+
+    current_high_priority = (
+        int(current_df["alert_level"].isin(["High", "Critical"]).sum())
+        if current_volume
+        else 0
+    )
+    previous_high_priority = (
+        int(previous_df["alert_level"].isin(["High", "Critical"]).sum())
+        if previous_volume
+        else 0
+    )
+
+    current_unique_outlets = (
+        int(current_df["outlet_platform"].nunique()) if current_volume else 0
+    )
+    previous_unique_outlets = (
+        int(previous_df["outlet_platform"].nunique()) if previous_volume else 0
+    )
+
+    weekday_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    current_dates = [
+        current_start + timedelta(days=offset) for offset in range(7)
+    ]
+    previous_dates = [
+        previous_start + timedelta(days=offset) for offset in range(7)
+    ]
+
+    current_daily_counts = (
+        current_df.groupby("insert_date").size().to_dict()
+        if current_volume
+        else {}
+    )
+    previous_daily_counts = (
+        previous_df.groupby("insert_date").size().to_dict()
+        if previous_volume
+        else {}
+    )
+
+    volume_chart = pd.DataFrame(
+        {
+            "Day": weekday_labels,
+            "Selected week": [
+                int(current_daily_counts.get(day, 0)) for day in current_dates
+            ],
+            "Previous week": [
+                int(previous_daily_counts.get(day, 0)) for day in previous_dates
+            ],
+        }
+    ).set_index("Day")
+
+    sentiment_categories = ["Positive", "Neutral", "Negative", "Mixed", "Unknown"]
+    current_sentiment_counts = (
+        current_df["sentiment_category"].value_counts().to_dict()
+        if current_volume
+        else {}
+    )
+    previous_sentiment_counts = (
+        previous_df["sentiment_category"].value_counts().to_dict()
+        if previous_volume
+        else {}
+    )
+
+    sentiment_chart = pd.DataFrame(
+        {
+            "Sentiment": sentiment_categories,
+            "Selected week": [
+                int(current_sentiment_counts.get(category, 0))
+                for category in sentiment_categories
+            ],
+            "Previous week": [
+                int(previous_sentiment_counts.get(category, 0))
+                for category in sentiment_categories
+            ],
+        }
+    ).set_index("Sentiment")
+
+    current_keyword_counts = count_keyword_mentions(current_records, keyword_rows)
+    previous_keyword_counts = count_keyword_mentions(previous_records, keyword_rows)
+    keyword_rows_output = []
+
+    for term in sorted(
+        set(current_keyword_counts) | set(previous_keyword_counts),
+        key=lambda item: current_keyword_counts.get(item, 0),
+        reverse=True,
+    ):
+        current_count = current_keyword_counts.get(term, 0)
+        previous_count = previous_keyword_counts.get(term, 0)
+        percentage_change = calculate_percentage_change(
+            current_count,
+            previous_count,
+        )
+
+        if percentage_change is None:
+            change_label = "0.0%"
+        elif percentage_change == float("inf"):
+            change_label = "New"
+        else:
+            change_label = f"{percentage_change:+.1f}%"
+
+        keyword_rows_output.append(
+            {
+                "Keyword": term,
+                "Selected week": current_count,
+                "Previous week": previous_count,
+                "Change": current_count - previous_count,
+                "Change %": change_label,
+            }
+        )
+
+    keyword_table = pd.DataFrame(keyword_rows_output)
+    if not keyword_table.empty:
+        keyword_table = keyword_table.sort_values(
+            ["Selected week", "Change"],
+            ascending=[False, False],
+        )
+
+    outlet_chart = pd.DataFrame()
+    if current_volume or previous_volume:
+        current_outlets = (
+            current_df["outlet_platform"].value_counts()
+            if current_volume
+            else pd.Series(dtype=int)
+        )
+        previous_outlets = (
+            previous_df["outlet_platform"].value_counts()
+            if previous_volume
+            else pd.Series(dtype=int)
+        )
+        top_outlets = list(
+            (current_outlets.add(previous_outlets, fill_value=0))
+            .sort_values(ascending=False)
+            .head(10)
+            .index
+        )
+        outlet_chart = pd.DataFrame(
+            {
+                "Outlet": top_outlets,
+                "Selected week": [
+                    int(current_outlets.get(outlet, 0)) for outlet in top_outlets
+                ],
+                "Previous week": [
+                    int(previous_outlets.get(outlet, 0)) for outlet in top_outlets
+                ],
+            }
+        ).set_index("Outlet")
+
+    theme_chart = pd.DataFrame()
+    if current_volume or previous_volume:
+        current_themes = (
+            current_df["theme"].value_counts()
+            if current_volume
+            else pd.Series(dtype=int)
+        )
+        previous_themes = (
+            previous_df["theme"].value_counts()
+            if previous_volume
+            else pd.Series(dtype=int)
+        )
+        top_themes = list(
+            (current_themes.add(previous_themes, fill_value=0))
+            .sort_values(ascending=False)
+            .head(10)
+            .index
+        )
+        theme_chart = pd.DataFrame(
+            {
+                "Theme": top_themes,
+                "Selected week": [
+                    int(current_themes.get(theme, 0)) for theme in top_themes
+                ],
+                "Previous week": [
+                    int(previous_themes.get(theme, 0)) for theme in top_themes
+                ],
+            }
+        ).set_index("Theme")
+
+    detail_columns = [
+        "date_published",
+        "inserted_at",
+        "outlet_platform",
+        "title",
+        "theme",
+        "sentiment_category",
+        "sentiment_score",
+        "alert_level",
+        "recommendation",
+        "assigned_to_user",
+    ]
+    detail_table = (
+        current_df[detail_columns]
+        .sort_values("inserted_at", ascending=False)
+        .copy()
+        if current_volume
+        else pd.DataFrame(columns=detail_columns)
+    )
+
+    if not detail_table.empty:
+        detail_table["inserted_at"] = detail_table["inserted_at"].dt.strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        detail_table = detail_table.rename(
+            columns={
+                "date_published": "Published",
+                "inserted_at": "Inserted",
+                "outlet_platform": "Outlet",
+                "title": "Title",
+                "theme": "Theme",
+                "sentiment_category": "Sentiment",
+                "sentiment_score": "Score",
+                "alert_level": "Alert",
+                "recommendation": "Recommendation",
+                "assigned_to_user": "Assigned to",
+            }
+        )
+
+    metrics = {
+        "current_volume": current_volume,
+        "previous_volume": previous_volume,
+        "current_average_sentiment": current_average_sentiment,
+        "previous_average_sentiment": previous_average_sentiment,
+        "current_positive": current_positive,
+        "previous_positive": previous_positive,
+        "current_negative": current_negative,
+        "previous_negative": previous_negative,
+        "current_high_priority": current_high_priority,
+        "previous_high_priority": previous_high_priority,
+        "current_unique_outlets": current_unique_outlets,
+        "previous_unique_outlets": previous_unique_outlets,
+        "volume_change_percent": calculate_percentage_change(
+            current_volume,
+            previous_volume,
+        ),
+    }
+
+    return {
+        "current_period": (
+            f"{current_start.isoformat()} to {current_end.isoformat()}"
+        ),
+        "previous_period": (
+            f"{previous_start.isoformat()} to {previous_end.isoformat()}"
+        ),
+        "metrics": metrics,
+        "volume_chart": volume_chart.to_dict(),
+        "sentiment_chart": sentiment_chart.to_dict(),
+        "keyword_table": keyword_table.to_dict("records"),
+        "outlet_chart": outlet_chart.to_dict() if not outlet_chart.empty else {},
+        "theme_chart": theme_chart.to_dict() if not theme_chart.empty else {},
+        "detail_table": detail_table.to_dict("records"),
+    }
+
+
+def generate_weekly_quantitative_interpretation(package: dict) -> str:
+    """Use Gemini to interpret calculated metrics without recalculating them."""
+    instruction = """
+You are the senior media-monitoring analyst for AIA Canada.
+
+Interpret the supplied quantitative weekly report. The calculations have
+already been completed by the application.
+
+Rules:
+1. Use only the supplied metrics and tables.
+2. Do not recalculate, invent or estimate values.
+3. Compare the selected week with the previous week.
+4. Explicitly identify increases, decreases and unchanged measures.
+5. Treat low-volume samples cautiously and say when a trend may be unstable.
+6. Highlight sentiment movement, volume movement, keyword movement, outlet
+   concentration, themes and high-priority mentions.
+7. Use Canadian Press style.
+8. Provide exactly these sections:
+   ## Quantitative Executive Summary
+   ## Material Week-over-Week Changes
+   ## Emerging Topics and Keywords
+   ## Risks and Recommended Actions
+9. Keep the analysis concise and suitable for executives.
+"""
+
+    response = ai_client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=json.dumps(package, default=str),
+        config=types.GenerateContentConfig(system_instruction=instruction),
+    )
+    return response.text
+
+
+def render_weekly_quantitative_report(package: dict) -> None:
+    """Render a persistent quantitative weekly dashboard with explicit charts."""
+    metrics = package["metrics"]
+
+    st.markdown("### Quantitative Executive Dashboard")
+    st.caption(
+        f"Selected week: {package['current_period']} | "
+        f"Comparison week: {package['previous_period']}"
+    )
+
+    metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
+
+    with metric_col1:
+        st.metric(
+            "Mention volume",
+            metrics["current_volume"],
+            format_metric_delta(
+                metrics["current_volume"],
+                metrics["previous_volume"],
+            ),
+        )
+
+    with metric_col2:
+        st.metric(
+            "Average sentiment",
+            f"{metrics['current_average_sentiment']:.2f}",
+            format_metric_delta(
+                metrics["current_average_sentiment"],
+                metrics["previous_average_sentiment"],
+            ),
+        )
+
+    with metric_col3:
+        st.metric(
+            "Positive mentions",
+            metrics["current_positive"],
+            format_metric_delta(
+                metrics["current_positive"],
+                metrics["previous_positive"],
+            ),
+        )
+
+    with metric_col4:
+        st.metric(
+            "Negative mentions",
+            metrics["current_negative"],
+            format_metric_delta(
+                metrics["current_negative"],
+                metrics["previous_negative"],
+            ),
+            delta_color="inverse",
+        )
+
+    with metric_col5:
+        st.metric(
+            "High/Critical",
+            metrics["current_high_priority"],
+            format_metric_delta(
+                metrics["current_high_priority"],
+                metrics["previous_high_priority"],
+            ),
+            delta_color="inverse",
+        )
+
+    volume_df = pd.DataFrame(package.get("volume_chart") or {})
+    sentiment_df = pd.DataFrame(package.get("sentiment_chart") or {})
+    theme_df = pd.DataFrame(package.get("theme_chart") or {})
+    outlet_df = pd.DataFrame(package.get("outlet_chart") or {})
+    keyword_df = pd.DataFrame(package.get("keyword_table") or [])
+
+    volume_col, sentiment_col = st.columns(2)
+
+    with volume_col:
+        st.markdown("#### Daily Mention Volume")
+        if volume_df.empty:
+            st.info("No daily volume data is available.")
+        else:
+            volume_plot = (
+                volume_df.rename_axis("Day")
+                .reset_index()
+                .melt(
+                    id_vars="Day",
+                    value_vars=["Selected week", "Previous week"],
+                    var_name="Period",
+                    value_name="Mentions",
                 )
-                a_desc = st.text_area("Description")
-
-                if st.form_submit_button("Save Account to Chart of Accounts"):
-                    if a_code and a_name:
-                        supabase.table("chart_of_accounts").insert({
-                            "account_code": a_code,
-                            "account_name": a_name,
-                            "account_type": a_type,
-                            "description": a_desc,
-                        }).execute()
-                        st.success(f"Added account {a_code} - {a_name}!")
-                        st.rerun()
-
-    with col_coa2:
-        st.subheader("Active Chart of Accounts")
-        if all_accounts:
-            st.dataframe(
-                pd.DataFrame(all_accounts)[
-                    ["account_code", "account_name", "account_type", "description"]
-                ].rename(columns={
-                    "account_code": "Code",
-                    "account_name": "Account Name",
-                    "account_type": "Classification",
-                    "description": "Ledger Description",
-                }),
+            )
+            st.vega_lite_chart(
+                volume_plot,
+                {
+                    "mark": {"type": "line", "point": True},
+                    "encoding": {
+                        "x": {
+                            "field": "Day",
+                            "type": "ordinal",
+                            "sort": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                            "title": "Day",
+                        },
+                        "y": {
+                            "field": "Mentions",
+                            "type": "quantitative",
+                            "title": "Mention count",
+                        },
+                        "color": {
+                            "field": "Period",
+                            "type": "nominal",
+                            "title": "Period",
+                        },
+                        "tooltip": [
+                            {"field": "Day", "type": "ordinal"},
+                            {"field": "Period", "type": "nominal"},
+                            {"field": "Mentions", "type": "quantitative"},
+                        ],
+                    },
+                },
                 use_container_width=True,
             )
 
-# ----------------------------------------------------
-# 17. ACCOUNTANT HANDOFF EXPORT PACK
-# ----------------------------------------------------
-elif page == "Accountant Handoff Export Pack":
-    st.title("💼 Accountant Year-End & Period Handoff Pack")
-    st.markdown(
-        "1-Click export of complete bookkeeping packages: General Ledger, Trial"
-        " Balance, P&L, Balance Sheet, A/R Aging, A/P Aging, and Sales Tax"
-        " schedules."
+    with sentiment_col:
+        st.markdown("#### Sentiment Distribution")
+        if sentiment_df.empty:
+            st.info("No sentiment data is available.")
+        else:
+            sentiment_plot = (
+                sentiment_df.rename_axis("Sentiment")
+                .reset_index()
+                .melt(
+                    id_vars="Sentiment",
+                    value_vars=["Selected week", "Previous week"],
+                    var_name="Period",
+                    value_name="Mentions",
+                )
+            )
+            st.vega_lite_chart(
+                sentiment_plot,
+                {
+                    "mark": "bar",
+                    "encoding": {
+                        "x": {
+                            "field": "Sentiment",
+                            "type": "nominal",
+                            "title": "Sentiment",
+                        },
+                        "y": {
+                            "field": "Mentions",
+                            "type": "quantitative",
+                            "title": "Mention count",
+                        },
+                        "xOffset": {"field": "Period"},
+                        "color": {
+                            "field": "Period",
+                            "type": "nominal",
+                            "title": "Period",
+                        },
+                        "tooltip": [
+                            {"field": "Sentiment", "type": "nominal"},
+                            {"field": "Period", "type": "nominal"},
+                            {"field": "Mentions", "type": "quantitative"},
+                        ],
+                    },
+                },
+                use_container_width=True,
+            )
+
+    keyword_col, theme_col = st.columns(2)
+
+    with keyword_col:
+        st.markdown("#### Keyword Mention Trends")
+        if keyword_df.empty:
+            st.info("No configured monitoring keywords matched either week.")
+        else:
+            keyword_plot = keyword_df.head(15).melt(
+                id_vars="Keyword",
+                value_vars=["Selected week", "Previous week"],
+                var_name="Period",
+                value_name="Mentions",
+            )
+            st.vega_lite_chart(
+                keyword_plot,
+                {
+                    "mark": "bar",
+                    "encoding": {
+                        "y": {
+                            "field": "Keyword",
+                            "type": "nominal",
+                            "sort": "-x",
+                            "title": "Keyword",
+                        },
+                        "x": {
+                            "field": "Mentions",
+                            "type": "quantitative",
+                            "title": "Mention count",
+                        },
+                        "yOffset": {"field": "Period"},
+                        "color": {
+                            "field": "Period",
+                            "type": "nominal",
+                            "title": "Period",
+                        },
+                        "tooltip": [
+                            {"field": "Keyword", "type": "nominal"},
+                            {"field": "Period", "type": "nominal"},
+                            {"field": "Mentions", "type": "quantitative"},
+                        ],
+                    },
+                },
+                use_container_width=True,
+            )
+            with st.expander("View keyword comparison table"):
+                st.dataframe(keyword_df, use_container_width=True, hide_index=True)
+
+    with theme_col:
+        st.markdown("#### Theme Volume")
+        if theme_df.empty:
+            st.info("No theme data is available.")
+        else:
+            theme_plot = (
+                theme_df.rename_axis("Theme")
+                .reset_index()
+                .melt(
+                    id_vars="Theme",
+                    value_vars=["Selected week", "Previous week"],
+                    var_name="Period",
+                    value_name="Mentions",
+                )
+            )
+            st.vega_lite_chart(
+                theme_plot,
+                {
+                    "mark": "bar",
+                    "encoding": {
+                        "y": {
+                            "field": "Theme",
+                            "type": "nominal",
+                            "sort": "-x",
+                            "title": "Theme",
+                        },
+                        "x": {
+                            "field": "Mentions",
+                            "type": "quantitative",
+                            "title": "Mention count",
+                        },
+                        "yOffset": {"field": "Period"},
+                        "color": {
+                            "field": "Period",
+                            "type": "nominal",
+                            "title": "Period",
+                        },
+                        "tooltip": [
+                            {"field": "Theme", "type": "nominal"},
+                            {"field": "Period", "type": "nominal"},
+                            {"field": "Mentions", "type": "quantitative"},
+                        ],
+                    },
+                },
+                use_container_width=True,
+            )
+
+    st.markdown("#### Top Outlet Volume")
+    if outlet_df.empty:
+        st.info("No outlet data is available.")
+    else:
+        outlet_plot = (
+            outlet_df.rename_axis("Outlet")
+            .reset_index()
+            .melt(
+                id_vars="Outlet",
+                value_vars=["Selected week", "Previous week"],
+                var_name="Period",
+                value_name="Mentions",
+            )
+        )
+        st.vega_lite_chart(
+            outlet_plot,
+            {
+                "mark": "bar",
+                "encoding": {
+                    "y": {
+                        "field": "Outlet",
+                        "type": "nominal",
+                        "sort": "-x",
+                        "title": "Outlet",
+                    },
+                    "x": {
+                        "field": "Mentions",
+                        "type": "quantitative",
+                        "title": "Mention count",
+                    },
+                    "yOffset": {"field": "Period"},
+                    "color": {
+                        "field": "Period",
+                        "type": "nominal",
+                        "title": "Period",
+                    },
+                    "tooltip": [
+                        {"field": "Outlet", "type": "nominal"},
+                        {"field": "Period", "type": "nominal"},
+                        {"field": "Mentions", "type": "quantitative"},
+                    ],
+                },
+            },
+            use_container_width=True,
+        )
+
+    st.markdown("#### Gemini Interpretation")
+    st.markdown(package.get("ai_interpretation") or "No interpretation available.")
+
+    with st.expander("View mentions used in the selected week"):
+        detail_df = pd.DataFrame(package.get("detail_table") or [])
+        if detail_df.empty:
+            st.info("No reportable mentions were available.")
+        else:
+            st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+
+
+def _pdf_safe(value) -> str:
+    """Convert a value to escaped text suitable for ReportLab paragraphs."""
+    if value is None:
+        return ""
+    return escape(str(value))
+
+
+def _make_line_chart(
+    chart_df: pd.DataFrame,
+    title: str,
+    width: float = 7.2 * inch,
+    height: float = 3.0 * inch,
+) -> Drawing:
+    """Build a two-series line chart for the PDF report."""
+    drawing = Drawing(width, height)
+    drawing.add(
+        Paragraph(
+            _pdf_safe(title),
+            ParagraphStyle(
+                "ChartTitle",
+                parent=getSampleStyleSheet()["Heading3"],
+                alignment=TA_CENTER,
+                fontSize=11,
+                leading=13,
+            ),
+        )
     )
 
-    try:
-        l_res = supabase.table("treatment_logs").select("calculated_fee").execute()
-        total_session_rev = (
-            sum(float(l.get("calculated_fee", 0)) for l in l_res.data)
-            if l_res.data
-            else 0.0
-        )
-    except Exception:
-        total_session_rev = 0.0
+    if chart_df.empty:
+        return drawing
 
-    try:
-        a_res = supabase.table("appointments").select("travel_fee").execute()
-        total_travel_rev = (
-            sum(float(a.get("travel_fee", 0)) for a in a_res.data)
-            if a_res.data
-            else 0.0
-        )
-    except Exception:
-        total_travel_rev = 0.0
+    selected = [float(value) for value in chart_df["Selected week"].tolist()]
+    previous = [float(value) for value in chart_df["Previous week"].tolist()]
+    points_selected = list(enumerate(selected))
+    points_previous = list(enumerate(previous))
 
-    try:
-        p_res = supabase.table("client_payments").select("amount_paid").execute()
-        total_collected = (
-            sum(float(p.get("amount_paid", 0)) for p in p_res.data)
-            if p_res.data
-            else 0.0
-        )
-    except Exception:
-        total_collected = 0.0
+    chart = LinePlot()
+    chart.x = 55
+    chart.y = 35
+    chart.width = width - 85
+    chart.height = height - 75
+    chart.data = [points_selected, points_previous]
+    chart.lines[0].strokeColor = colors.HexColor("#1f77b4")
+    chart.lines[0].strokeWidth = 2
+    chart.lines[0].symbol = makeMarker("Circle")
+    chart.lines[1].strokeColor = colors.HexColor("#7f7f7f")
+    chart.lines[1].strokeWidth = 2
+    chart.lines[1].symbol = makeMarker("Square")
+    chart.xValueAxis.valueMin = 0
+    chart.xValueAxis.valueMax = max(len(chart_df.index) - 1, 1)
+    chart.xValueAxis.valueSteps = list(range(len(chart_df.index)))
+    chart.xValueAxis.labelTextFormat = lambda value: str(chart_df.index[int(value)]) if int(value) < len(chart_df.index) else ""
+    chart.yValueAxis.valueMin = 0
+    max_value = max(selected + previous + [1])
+    chart.yValueAxis.valueMax = max_value + max(1, max_value * 0.15)
+    chart.yValueAxis.valueStep = max(1, round(chart.yValueAxis.valueMax / 5))
+    drawing.add(chart)
+    return drawing
 
-    try:
-        b_res = (
-            supabase.table("vendor_bills")
-            .select("subtotal, tax_hst, total_amount, amount_paid, category")
-            .execute()
-        )
-        total_bills_amt = (
-            sum(float(b.get("total_amount", 0)) for b in b_res.data)
-            if b_res.data
-            else 0.0
-        )
-        total_bills_paid = (
-            sum(float(b.get("amount_paid", 0)) for b in b_res.data)
-            if b_res.data
-            else 0.0
-        )
-        total_itc_tax = (
-            sum(float(b.get("tax_hst", 0)) for b in b_res.data)
-            if b_res.data
-            else 0.0
-        )
-    except Exception:
-        total_bills_amt, total_bills_paid, total_itc_tax = 0.0, 0.0, 0.0
 
-    total_revenue = total_session_rev + total_travel_rev
-    ar_balance = total_revenue - total_collected
-    ap_balance = total_bills_amt - total_bills_paid
-    operating_expenses = total_bills_amt - total_itc_tax
-    net_income = total_revenue - operating_expenses
+def _make_vertical_bar_chart(
+    chart_df: pd.DataFrame,
+    title: str,
+    width: float = 7.2 * inch,
+    height: float = 3.2 * inch,
+) -> Drawing:
+    """Build a grouped vertical bar chart for the PDF report."""
+    drawing = Drawing(width, height)
+    if chart_df.empty:
+        return drawing
 
-    trial_balance_data = [
-        {
-            "Account Code": "1010",
-            "Account Name": "Operating Bank Account",
-            "Debit ($ CAD)": f"${total_collected - total_bills_paid:,.2f}",
-            "Credit ($ CAD)": "$0.00",
-        },
-        {
-            "Account Code": "1050",
-            "Account Name": "Accounts Receivable (A/R)",
-            "Debit ($ CAD)": f"${ar_balance:,.2f}",
-            "Credit ($ CAD)": "$0.00",
-        },
-        {
-            "Account Code": "2010",
-            "Account Name": "Accounts Payable (A/P)",
-            "Debit ($ CAD)": "$0.00",
-            "Credit ($ CAD)": f"${ap_balance:,.2f}",
-        },
-        {
-            "Account Code": "2050",
-            "Account Name": "HST Collected on Sales",
-            "Debit ($ CAD)": "$0.00",
-            "Credit ($ CAD)": f"${total_revenue * 0.13:,.2f}",
-        },
-        {
-            "Account Code": "2060",
-            "Account Name": "HST Input Tax Credits Paid",
-            "Debit ($ CAD)": f"${total_itc_tax:,.2f}",
-            "Credit ($ CAD)": "$0.00",
-        },
-        {
-            "Account Code": "4010",
-            "Account Name": "Therapy Session Revenue",
-            "Debit ($ CAD)": "$0.00",
-            "Credit ($ CAD)": f"${total_session_rev:,.2f}",
-        },
-        {
-            "Account Code": "4020",
-            "Account Name": "Corridor Mileage Revenue",
-            "Debit ($ CAD)": "$0.00",
-            "Credit ($ CAD)": f"${total_travel_rev:,.2f}",
-        },
-        {
-            "Account Code": "5000",
-            "Account Name": "Operating Expenses (Total)",
-            "Debit ($ CAD)": f"${operating_expenses:,.2f}",
-            "Credit ($ CAD)": "$0.00",
-        },
+    chart = VerticalBarChart()
+    chart.x = 55
+    chart.y = 45
+    chart.width = width - 85
+    chart.height = height - 85
+    chart.data = [
+        [float(value) for value in chart_df["Selected week"].tolist()],
+        [float(value) for value in chart_df["Previous week"].tolist()],
+    ]
+    chart.categoryAxis.categoryNames = [str(value)[:18] for value in chart_df.index]
+    chart.categoryAxis.labels.angle = 20
+    chart.categoryAxis.labels.dy = -12
+    chart.categoryAxis.labels.fontSize = 7
+    chart.valueAxis.valueMin = 0
+    max_value = max(chart.data[0] + chart.data[1] + [1])
+    chart.valueAxis.valueMax = max_value + max(1, max_value * 0.15)
+    chart.valueAxis.valueStep = max(1, round(chart.valueAxis.valueMax / 5))
+    chart.bars[0].fillColor = colors.HexColor("#1f77b4")
+    chart.bars[1].fillColor = colors.HexColor("#7f7f7f")
+    drawing.add(chart)
+
+    styles = getSampleStyleSheet()
+    drawing.add(
+        Paragraph(
+            _pdf_safe(title),
+            ParagraphStyle(
+                "BarTitle",
+                parent=styles["Heading3"],
+                alignment=TA_CENTER,
+                fontSize=11,
+                leading=13,
+            ),
+        )
+    )
+    return drawing
+
+
+def _make_horizontal_bar_chart(
+    chart_df: pd.DataFrame,
+    title: str,
+    label_column: str,
+    width: float = 7.2 * inch,
+    height: float = 4.2 * inch,
+) -> Drawing:
+    """Build a grouped horizontal bar chart for the PDF report."""
+    drawing = Drawing(width, height)
+    if chart_df.empty:
+        return drawing
+
+    limited_df = chart_df.head(12).copy()
+    labels = [str(value)[:36] for value in limited_df[label_column].tolist()]
+    chart = HorizontalBarChart()
+    chart.x = 140
+    chart.y = 35
+    chart.width = width - 175
+    chart.height = height - 80
+    chart.data = [
+        [float(value) for value in limited_df["Selected week"].tolist()],
+        [float(value) for value in limited_df["Previous week"].tolist()],
+    ]
+    chart.categoryAxis.categoryNames = labels
+    chart.categoryAxis.labels.fontSize = 7
+    chart.valueAxis.valueMin = 0
+    max_value = max(chart.data[0] + chart.data[1] + [1])
+    chart.valueAxis.valueMax = max_value + max(1, max_value * 0.15)
+    chart.valueAxis.valueStep = max(1, round(chart.valueAxis.valueMax / 5))
+    chart.bars[0].fillColor = colors.HexColor("#1f77b4")
+    chart.bars[1].fillColor = colors.HexColor("#7f7f7f")
+    drawing.add(chart)
+
+    styles = getSampleStyleSheet()
+    drawing.add(
+        Paragraph(
+            _pdf_safe(title),
+            ParagraphStyle(
+                "HorizontalBarTitle",
+                parent=styles["Heading3"],
+                alignment=TA_CENTER,
+                fontSize=11,
+                leading=13,
+            ),
+        )
+    )
+    return drawing
+
+
+def build_weekly_trend_pdf(package: dict) -> bytes:
+    """Create a portable PDF version of the quantitative weekly report."""
+    buffer = BytesIO()
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(letter),
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36,
+        title="AIA Canada Weekly Quantitative Trend Report",
+        author="AIA Canada Media Monitor",
+    )
+
+    styles = getSampleStyleSheet()
+    styles.add(
+        ParagraphStyle(
+            name="ReportTitle",
+            parent=styles["Title"],
+            fontSize=20,
+            leading=24,
+            spaceAfter=12,
+            alignment=TA_CENTER,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="ReportSubtitle",
+            parent=styles["Normal"],
+            fontSize=9,
+            leading=12,
+            textColor=colors.HexColor("#555555"),
+            alignment=TA_CENTER,
+            spaceAfter=16,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="SmallBody",
+            parent=styles["BodyText"],
+            fontSize=8,
+            leading=10,
+        )
+    )
+
+    story = [
+        Paragraph("AIA Canada Weekly Quantitative Trend Report", styles["ReportTitle"]),
+        Paragraph(
+            f"Selected week: {_pdf_safe(package.get('current_period'))} &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"Comparison week: {_pdf_safe(package.get('previous_period'))}",
+            styles["ReportSubtitle"],
+        ),
     ]
 
-    st.subheader("📑 Period Trial Balance Summary")
-    st.dataframe(pd.DataFrame(trial_balance_data), use_container_width=True)
-
-    tb_csv = pd.DataFrame(trial_balance_data).to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="📥 Download Complete Trial Balance & General Ledger (CSV)",
-        data=tb_csv,
-        file_name=(
-            f"EquusOS_Trial_Balance_For_Accountant_{datetime.date.today()}.csv"
-        ),
-        mime="text/csv",
-    )
-
-# ----------------------------------------------------
-# 18. EMAIL INVOICE DISPATCHER
-# ----------------------------------------------------
-elif page == "Email Invoice Dispatcher":
-    st.title("📧 Direct Email Statement & Receipt Dispatcher")
-    st.markdown(
-        "Dispatch professional PDF invoices directly to clients and barn managers"
-        " with pre-filled e-Transfer instructions."
-    )
-
-    if barns:
-        col_em1, col_em2 = st.columns([1, 1])
-        with col_em1:
-            barn_options = {b["name"]: b["id"] for b in barns}
-            sel_b_name = st.selectbox(
-                "Select Barn / Facility to Bill",
-                list(barn_options.keys()),
-                key="email_b_select",
-            )
-            sel_b_id = barn_options[sel_b_name]
-            fac_horses = [h for h in horses if h.get("barn_id") == sel_b_id]
-
-            recipient = st.text_input(
-                "Recipient Email Address", placeholder="owner@barn.ca"
-            )
-            email_subj = st.text_input(
-                "Email Subject",
-                value=(
-                    f"Equus Performance Statement - {sel_b_name} ("
-                    f"{datetime.date.today().strftime('%B %Y')})"
-                ),
-            )
-            email_body_input = st.text_area(
-                "Email Message Body",
-                value=(
-                    "Attached is your therapy statement from Equus Performance"
-                    " Therapeutics. Payment via e-Transfer to"
-                    " paige@equusperformance.ca"
-                ),
-                height=140,
-            )
-
-        with col_em2:
-            fac_h_ids = [h["id"] for h in fac_horses]
-            try:
-                l_res = (
-                    supabase.table("treatment_logs")
-                    .select("*")
-                    .order("created_at", desc=True)
-                    .execute()
-                )
-                all_l = l_res.data if l_res.data else []
-            except Exception:
-                all_l = []
-
-            fac_logs = [l for l in all_l if l.get("horse_id") in fac_h_ids]
-            h_dict = {h["id"]: h for h in fac_horses}
-            inv_rows = []
-            tot_amt = 0.0
-
-            for l in fac_logs:
-                h = h_dict.get(l.get("horse_id"), {})
-                fee = float(l.get("calculated_fee", 0))
-                tot_amt += fee
-                inv_rows.append({
-                    "Date": l.get("created_at", "")[:10],
-                    "Horse Name": h.get("name", "Unknown"),
-                    "Owner": h.get("owner_name", "Unknown"),
-                    "Modality": l.get("modality", ""),
-                    "Duration (Mins)": l.get("duration_minutes", 0),
-                    "Fee (CAD)": f"${fee:.2f}",
-                    "Notes": l.get("session_notes", ""),
-                })
-
-            if inv_rows:
-                pdf_bytes_obj = bytes(create_pdf_invoice(sel_b_name, inv_rows, tot_amt))
-                file_name_str = f"Equus_Invoice_{sel_b_name.replace(' ', '_')}_{datetime.date.today()}.pdf"
-
-                if st.button("🚀 Send Official Invoice & PDF Attachment"):
-                    if recipient and "@" in recipient:
-                        with st.spinner("Sending email..."):
-                            success, msg_result = send_email_with_pdf(
-                                recipient,
-                                email_subj,
-                                email_body_input,
-                                pdf_bytes_obj,
-                                file_name_str,
-                            )
-                            if success:
-                                st.success(msg_result)
-                            else:
-                                st.error(msg_result)
-
-# ----------------------------------------------------
-# 19. MONTHLY INVOICING & PDF STATEMENTS
-# ----------------------------------------------------
-elif page == "Monthly Invoicing & PDF Statements":
-    st.title("Monthly Invoicing & Billing Summary")
-    st.markdown(
-        "Generate monthly billing breakdowns and export professional PDF"
-        " statements for barns and owners."
-    )
-
-    if barns:
-        barn_opts = {b["name"]: b["id"] for b in barns}
-        chosen_barn_name = st.selectbox(
-            "Select Barn / Facility", list(barn_opts.keys())
+    metrics = package.get("metrics") or {}
+    metric_rows = [
+        ["Metric", "Selected week", "Previous week", "Change"],
+        [
+            "Mention volume",
+            metrics.get("current_volume", 0),
+            metrics.get("previous_volume", 0),
+            format_metric_delta(metrics.get("current_volume", 0), metrics.get("previous_volume", 0)),
+        ],
+        [
+            "Average sentiment",
+            f"{metrics.get('current_average_sentiment', 0):.2f}",
+            f"{metrics.get('previous_average_sentiment', 0):.2f}",
+            format_metric_delta(
+                metrics.get("current_average_sentiment", 0),
+                metrics.get("previous_average_sentiment", 0),
+            ),
+        ],
+        [
+            "Positive mentions",
+            metrics.get("current_positive", 0),
+            metrics.get("previous_positive", 0),
+            format_metric_delta(metrics.get("current_positive", 0), metrics.get("previous_positive", 0)),
+        ],
+        [
+            "Negative mentions",
+            metrics.get("current_negative", 0),
+            metrics.get("previous_negative", 0),
+            format_metric_delta(metrics.get("current_negative", 0), metrics.get("previous_negative", 0)),
+        ],
+        [
+            "High/Critical",
+            metrics.get("current_high_priority", 0),
+            metrics.get("previous_high_priority", 0),
+            format_metric_delta(
+                metrics.get("current_high_priority", 0),
+                metrics.get("previous_high_priority", 0),
+            ),
+        ],
+        [
+            "Unique outlets",
+            metrics.get("current_unique_outlets", 0),
+            metrics.get("previous_unique_outlets", 0),
+            format_metric_delta(
+                metrics.get("current_unique_outlets", 0),
+                metrics.get("previous_unique_outlets", 0),
+            ),
+        ],
+    ]
+    metric_table = Table(metric_rows, colWidths=[2.2 * inch, 1.4 * inch, 1.4 * inch, 1.6 * inch], repeatRows=1)
+    metric_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f4e78")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#bbbbbb")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f6f8")]),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 7),
+                ("TOPPADDING", (0, 0), (-1, 0), 7),
+            ]
         )
-        chosen_barn_id = barn_opts[chosen_barn_name]
+    )
+    story.extend([Paragraph("Executive Metrics", styles["Heading2"]), metric_table, Spacer(1, 16)])
 
-        facility_horses = [h for h in horses if h.get("barn_id") == chosen_barn_id]
-        facility_horse_ids = [h["id"] for h in facility_horses]
+    interpretation = package.get("ai_interpretation") or "No interpretation available."
+    for raw_line in str(interpretation).splitlines():
+        line = raw_line.strip()
+        if not line:
+            story.append(Spacer(1, 5))
+        elif line.startswith("## "):
+            story.append(Paragraph(_pdf_safe(line[3:]), styles["Heading2"]))
+        elif line.startswith("- "):
+            story.append(Paragraph(f"• {_pdf_safe(line[2:])}", styles["BodyText"]))
+        else:
+            story.append(Paragraph(_pdf_safe(line), styles["BodyText"]))
 
+    story.append(PageBreak())
+
+    volume_df = pd.DataFrame(package.get("volume_chart") or {})
+    sentiment_df = pd.DataFrame(package.get("sentiment_chart") or {})
+    keyword_df = pd.DataFrame(package.get("keyword_table") or [])
+    theme_df = pd.DataFrame(package.get("theme_chart") or {})
+    outlet_df = pd.DataFrame(package.get("outlet_chart") or {})
+
+    story.extend(
+        [
+            Paragraph("Charts and Trend Comparisons", styles["Heading1"]),
+            _make_line_chart(volume_df, "Daily Mention Volume"),
+            Spacer(1, 12),
+            _make_vertical_bar_chart(sentiment_df, "Sentiment Distribution"),
+            PageBreak(),
+        ]
+    )
+
+    if not keyword_df.empty:
+        story.extend(
+            [
+                _make_horizontal_bar_chart(
+                    keyword_df.sort_values("Selected week", ascending=False),
+                    "Keyword Mention Trends",
+                    "Keyword",
+                ),
+                Spacer(1, 12),
+            ]
+        )
+
+    if not theme_df.empty:
+        theme_pdf_df = theme_df.rename_axis("Theme").reset_index()
+        story.extend(
+            [
+                _make_horizontal_bar_chart(
+                    theme_pdf_df.sort_values("Selected week", ascending=False),
+                    "Theme Volume",
+                    "Theme",
+                ),
+                PageBreak(),
+            ]
+        )
+
+    if not outlet_df.empty:
+        outlet_pdf_df = outlet_df.rename_axis("Outlet").reset_index()
+        story.extend(
+            [
+                _make_horizontal_bar_chart(
+                    outlet_pdf_df.sort_values("Selected week", ascending=False),
+                    "Top Outlet Volume",
+                    "Outlet",
+                ),
+                Spacer(1, 12),
+            ]
+        )
+
+    detail_df = pd.DataFrame(package.get("detail_table") or [])
+    if not detail_df.empty:
+        story.append(Paragraph("Selected-Week Mention Detail", styles["Heading1"]))
+        display_columns = [
+            column
+            for column in [
+                "Published",
+                "Outlet",
+                "Title",
+                "Theme",
+                "Sentiment",
+                "Score",
+                "Alert",
+                "Recommendation",
+                "Assigned to",
+            ]
+            if column in detail_df.columns
+        ]
+        detail_df = detail_df[display_columns].fillna("")
+        detail_rows = [
+            [Paragraph(_pdf_safe(column), styles["SmallBody"]) for column in display_columns]
+        ]
+        for _, row in detail_df.iterrows():
+            detail_rows.append(
+                [
+                    Paragraph(_pdf_safe(row[column]), styles["SmallBody"])
+                    for column in display_columns
+                ]
+            )
+
+        available_width = 10.0 * inch
+        widths = []
+        for column in display_columns:
+            if column == "Title":
+                widths.append(2.6 * inch)
+            elif column in {"Outlet", "Theme", "Assigned to"}:
+                widths.append(1.25 * inch)
+            else:
+                widths.append(0.9 * inch)
+        scale = available_width / sum(widths)
+        widths = [width * scale for width in widths]
+
+        detail_table = Table(detail_rows, colWidths=widths, repeatRows=1)
+        detail_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f4e78")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cccccc")),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
+        story.append(detail_table)
+
+    def add_page_number(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#666666"))
+        canvas.drawString(36, 20, "AIA Canada Media Monitor")
+        canvas.drawRightString(landscape(letter)[0] - 36, 20, f"Page {doc.page}")
+        canvas.restoreState()
+
+    document.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
+    return buffer.getvalue()
+
+
+def build_weekly_report_mailto(
+    package: dict,
+    recipients: list[str],
+    additional_message: str = "",
+) -> str:
+    """Build an Outlook-ready email draft for a weekly PDF report."""
+    clean_recipients = []
+    seen = set()
+    for email in recipients:
+        email = str(email or "").strip()
+        if not email or email.lower() in seen:
+            continue
+        seen.add(email.lower())
+        clean_recipients.append(email)
+
+    metrics = package.get("metrics") or {}
+    subject = f"AIA Canada Weekly Media Trend Report — {package.get('current_period', '')}"
+    standard_message = (
+        additional_message.strip()
+        or "Hello,\n\nPlease find attached the AIA Canada Weekly Quantitative Media Trend Report."
+    )
+    body = (
+        f"{standard_message}\n\n"
+        f"Reporting period: {package.get('current_period', '')}\n"
+        f"Comparison period: {package.get('previous_period', '')}\n"
+        f"Mention volume: {metrics.get('current_volume', 0)}\n"
+        f"Average sentiment: {metrics.get('current_average_sentiment', 0):.2f}\n"
+        f"High/Critical mentions: {metrics.get('current_high_priority', 0)}\n\n"
+        "The PDF must be downloaded from the Media Monitor and attached to this draft before sending.\n\n"
+        "Regards,\nAIA Canada"
+    )
+    recipient_string = ",".join(clean_recipients)
+    return (
+        f"mailto:{quote(recipient_string, safe='@,')}"
+        f"?subject={quote(subject)}"
+        f"&body={quote(body)}"
+    )
+
+
+def render_weekly_pdf_share_controls(package: dict) -> None:
+    """Render PDF download and Outlook draft controls for the weekly report."""
+    st.markdown("---")
+    st.markdown("### 📄 Export and Share")
+
+    pdf_bytes = st.session_state.get("weekly_quantitative_pdf")
+    if not pdf_bytes:
         try:
-            logs_res = (
-                supabase.table("treatment_logs")
+            pdf_bytes = build_weekly_trend_pdf(package)
+            st.session_state["weekly_quantitative_pdf"] = pdf_bytes
+        except Exception as exc:
+            st.error(f"Unable to generate the weekly PDF: {exc}")
+            return
+
+    current_period = str(package.get("current_period") or "weekly-report")
+    safe_period = re.sub(r"[^0-9A-Za-z_-]+", "_", current_period)
+    filename = f"AIA_Canada_Weekly_Media_Trend_{safe_period}.pdf"
+
+    st.download_button(
+        "Download Weekly Trend PDF",
+        data=pdf_bytes,
+        file_name=filename,
+        mime="application/pdf",
+        use_container_width=True,
+        key="download_weekly_trend_pdf",
+    )
+
+    registered_recipients = load_registered_email_recipients()
+    recipient_map = {
+        recipient["label"]: recipient["email"]
+        for recipient in registered_recipients
+    }
+    selected_labels = st.multiselect(
+        "Select registered recipients",
+        options=list(recipient_map.keys()),
+        key="weekly_report_email_recipients",
+        placeholder="Select SLT members or other registered users",
+    )
+    additional_addresses = st.text_input(
+        "Additional email addresses",
+        key="weekly_report_additional_recipients",
+        placeholder="external@example.com, another@example.com",
+        help="Separate multiple addresses with commas or semicolons.",
+    )
+    standard_message = st.text_area(
+        "Email message",
+        value=(
+            "Hello,\n\n"
+            "Please find attached the AIA Canada Weekly Quantitative Media Trend Report "
+            "for your review."
+        ),
+        height=110,
+        key="weekly_report_email_message",
+    )
+
+    selected_emails = [recipient_map[label] for label in selected_labels]
+    extra_emails = [
+        email.strip()
+        for email in additional_addresses.replace(";", ",").split(",")
+        if email.strip()
+    ]
+    all_emails = selected_emails + extra_emails
+
+    if all_emails:
+        outlook_url = build_weekly_report_mailto(
+            package=package,
+            recipients=all_emails,
+            additional_message=standard_message,
+        )
+        st.link_button(
+            "Open Outlook Draft",
+            outlook_url,
+            use_container_width=True,
+        )
+    else:
+        st.caption("Select at least one recipient to enable the Outlook draft button.")
+
+    st.info(
+        "Browser email links cannot attach local files automatically. "
+        "Download the PDF first, open the Outlook draft, then attach the downloaded PDF. "
+        "Automatic attachment requires Microsoft Graph integration and organizational OAuth approval."
+    )
+
+
+# --- 2. SIDEBAR UTILITIES & WORKFLOW TRIGGER ---
+st.sidebar.title("📊 AIA Canada Monitor")
+st.sidebar.caption(f"Operator: {st.session_state['user_full_name']} ({USER_ROLE})")
+
+if st.sidebar.button("🔒 Sign Out / Lock Session", use_container_width=True):
+    supabase.auth.sign_out()
+    st.session_state["auth_user"] = None
+    st.session_state["user_role"] = "Viewer"
+    st.session_state["user_full_name"] = None
+    st.rerun()
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔄 Manual Data Sync")
+
+timeframe_label = st.sidebar.selectbox(
+    "Select Search Horizon Window:",
+    ["Past 24 Hours", "Past Week", "Past Month", "Past Year"],
+    disabled=IS_VIEWER
+)
+
+timeframe_map = {
+    "Past 24 Hours": "qdr:d",
+    "Past Week": "qdr:w",
+    "Past Month": "qdr:m",
+    "Past Year": "qdr:y"
+}
+selected_tbs = timeframe_map[timeframe_label]
+
+def get_latest_workflow_run_status():
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/runs"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['GITHUB_PAT']}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    params = {"per_page": 1}
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        if response.status_code == 200:
+            runs = response.json().get("workflow_runs", [])
+            if runs:
+                return runs[0].get("status"), runs[0].get("conclusion")
+    except Exception:
+        pass
+    return None, None
+
+def trigger_github_sync(tbs_val):
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['GITHUB_PAT']}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    data = {"ref": "main", "inputs": {"timeframe": tbs_val}} 
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 204:
+            st.sidebar.success(f"🚀 Sync initiated for {timeframe_label}!")
+            with st.spinner("Waiting for GitHub runner to complete search tasks..."):
+                time.sleep(5)
+                for _ in range(24): 
+                    status, conclusion = get_latest_workflow_run_status()
+                    if status == "completed":
+                        st.sidebar.success("✅ Extraction complete! Refreshing database tables...")
+                        time.sleep(1.5)
+                        st.rerun()
+                    elif status in ["queued", "in_progress"]:
+                        time.sleep(5)
+                    else:
+                        break
+                st.rerun()
+        else:
+            st.sidebar.error(f"❌ API Error: {response.status_code}")
+    except Exception as e:
+        st.sidebar.error(f"Connection failed: {e}")
+
+if st.sidebar.button("Force Fetch Mentions Now", use_container_width=True, disabled=IS_VIEWER):
+    with st.sidebar.spinner("Pinging GitHub Actions API..."):
+        trigger_github_sync(selected_tbs)
+
+st.sidebar.markdown("---")
+
+MEDIA_CONTACTS = load_media_contacts()
+CONTACT_NAMES = ["Unassigned", "➕ Add New Contact..."] + [f"{c['full_name']} ({c['outlet']})" for c in MEDIA_CONTACTS]
+CONTACT_MAP = {f"{c['full_name']} ({c['outlet']})": c['id'] for c in MEDIA_CONTACTS}
+
+app_mode = st.sidebar.radio(
+    "Navigation Menu", 
+    [
+        "📥 Inbox / Triage", 
+        "📋 Reviewed Database Table", 
+        "📞 Media CRM & Inquiries", 
+        "🚨 Daily Crisis Center", 
+        "📝 Report Builder", 
+        "💬 Ask AIA Media",
+        "⚙️ System Settings Dashboard"
+    ]
+)
+
+st.sidebar.markdown("---")
+# --- 🔔 IN-APP NOTIFICATION CENTER ---
+if st.session_state.get("user_full_name"):
+    notif_res = supabase.table("notifications").select("*").eq("recipient_name", st.session_state["user_full_name"]).eq("is_read", False).order("created_at", desc=True).execute()
+    unread_count = len(notif_res.data) if notif_res.data else 0
+    
+    if unread_count > 0:
+        with st.sidebar.expander(f"🔔 Notifications ({unread_count} Unread)", expanded=True):
+            for n in notif_res.data:
+                st.markdown(f"**From:** {n['sender_name']}")
+                st.caption(f"*{n['mention_title'][:40]}...*")
+                st.info(f"💬 {n['message']}")
+                
+                # Use a button to safely update the URL without refreshing the page
+                if n.get('mention_id'):
+                    if st.button("🔗 Open Direct Record Viewer", key=f"view_{n['id']}", use_container_width=True):
+                        st.query_params["mention_id"] = n['mention_id']
+                        st.rerun()
+                
+                if st.button("✅ Mark as Read", key=f"read_{n['id']}", use_container_width=True):
+                    supabase.table("notifications").update({"is_read": True}).eq("id", n['id']).execute()
+                    st.rerun()
+                st.markdown("---")
+    else:
+        st.sidebar.info("🔔 All caught up! No new notifications.")
+st.sidebar.markdown("---")
+
+# --- 🚀 URL DEEP LINK INTERCEPTOR ---
+if "mention_id" in st.query_params:
+    dl_id = st.query_params["mention_id"]
+    st.subheader("🔍 Direct Record Viewer")
+    
+    if st.button("⬅️ Close Viewer & Return to Dashboard", type="primary"):
+        st.query_params.clear()
+        st.rerun()
+        
+    st.markdown("---")
+    dl_res = supabase.table("mentions").select("*").eq("id", dl_id).execute()
+    
+    if not dl_res.data:
+        st.error("This record could not be found. It may have been permanently deleted.")
+    else:
+        target_record = dl_res.data[0]
+        
+        st.markdown(f"### 📄 Full Metadata Profile: `{target_record['title']}`")
+        st.info(f"🤖 **Gemini Strategic Action Recommendation:** {target_record.get('ai_action_recommendation', 'N/A')}")
+        
+        meta_col1, meta_col2, meta_col3 = st.columns(3)
+        with meta_col1:
+            st.markdown("**📌 Core Tracking Identifiers**")
+            st.write(f"- **Database ID:** `{target_record['id']}`")
+            st.write(f"- **Published Date:** `{target_record['date_published']}`")
+            st.write(f"- **Direct URL:** [Open Live Web Link]({target_record['url']})")
+        with meta_col2:
+            st.markdown("**🏷️ Context & Scope Tags**")
+            st.write(f"- **Brands Affected:** {', '.join(target_record['brands_affected']) if target_record['brands_affected'] else 'None mapped'}")
+            st.write(f"- **Workflow State:** `{target_record['status']}`")
+            st.write(f"- **Assigned Owner:** `{target_record['assigned_to_user'] or 'Unassigned'}`")
+        with meta_col3:
+            st.markdown("**🧠 Sentiment Metrics**")
+            st.write(f"- **Tone Category:** `{target_record['sentiment_category']}`")
+            st.write(f"- **Intensity Score:** `{target_record['sentiment_score']}`")
+            st.write(f"- **Action Strategy:** `{target_record['recommendation']}`")
+        
+        st.markdown("**📝 Text Snippet & Analytical Explanations**")
+        st.write(f"**Raw Snippet:** *\"{target_record['snippet']}\"*")
+        st.write(f"**AI Rationale:** *{target_record['sentiment_rationale']}*")
+        
+        st.markdown("---")
+        st.markdown("#### 📜 Actions Taken & Notes History Trail")
+        actions_res = supabase.table("mention_actions").select("*").eq("mention_id", target_record['id']).order("inserted_at", desc=True).execute()
+        
+        if not actions_res.data:
+            st.caption("No custom action notes logged for this profile yet.")
+        else:
+            history_df = pd.DataFrame(actions_res.data)
+            history_df = history_df.rename(columns={"inserted_at": "Timestamp", "performed_by": "User", "action_note": "Action Details"})
+            st.table(history_df[["Timestamp", "User", "Action Details"]])
+        
+        st.markdown("#### ✏️ Update Classification & Append New Action Log")
+        e1, e2, e3, e4 = st.columns(4)
+        with e1:
+            current_rec_idx = ["monitor only", "engage", "share", "ignore"].index(target_record['recommendation']) if target_record['recommendation'] in ["monitor only", "engage", "share", "ignore"] else 0
+            edit_rec = st.selectbox("Action Recommendation", ["monitor only", "engage", "share", "ignore"], index=current_rec_idx, key="dl_edit_rec", disabled=IS_VIEWER)
+        with e2:
+            current_lvl_idx = ["Low", "Medium", "High", "Critical"].index(target_record['alert_level']) if target_record['alert_level'] in ["Low", "Medium", "High", "Critical"] else 0
+            edit_lvl = st.selectbox("Severity Framework", ["Low", "Medium", "High", "Critical"], index=current_lvl_idx, key="dl_edit_lvl", disabled=IS_VIEWER)
+        with e3:
+            current_stat_idx = ["pending", "logged", "escalated", "resolved"].index(target_record['status']) if target_record['status'] in ["pending", "logged", "escalated", "resolved"] else 0
+            edit_stat = st.selectbox("Workflow State", ["pending", "logged", "escalated", "resolved"], index=current_stat_idx, key="dl_edit_stat", disabled=IS_VIEWER)
+        with e4:
+            current_user = target_record['assigned_to_user'] if target_record['assigned_to_user'] in TEAM_USERS else "Unassigned"
+            edit_user = st.selectbox("Reassign Owner", TEAM_USERS, index=TEAM_USERS.index(current_user), key="dl_edit_user", disabled=IS_VIEWER)
+            
+        edit_note = st.text_input("Type new action note to append to history trail:", key="dl_edit_note_input", disabled=IS_VIEWER)
+
+        # --- CRM AUTHOR ATTRIBUTION IN DEEP LINK ---
+        st.markdown("#### ✍️ Author Attribution")
+        current_auth_label = "Unassigned"
+        if target_record.get('author_contact_id'):
+            match = next((c for c in MEDIA_CONTACTS if c['id'] == target_record['author_contact_id']), None)
+            if match:
+                current_auth_label = f"{match['full_name']} ({match['outlet']})"
+        
+        author_sel = st.selectbox("Assign to Media Contact", CONTACT_NAMES, index=CONTACT_NAMES.index(current_auth_label) if current_auth_label in CONTACT_NAMES else 0, key=f"dl_auth_{target_record['id']}", disabled=IS_VIEWER)
+        
+        new_auth_name, new_auth_outlet = "", ""
+        if author_sel == "➕ Add New Contact...":
+            a1, a2 = st.columns(2)
+            with a1:
+                new_auth_name = st.text_input("New Contact Name*", key=f"dl_new_name_{target_record['id']}")
+            with a2:
+                new_auth_outlet = st.text_input("New Contact Outlet*", key=f"dl_new_out_{target_record['id']}")
+        
+        st.markdown("---")
+        render_share_mention_controls(
+            mention=target_record,
+            key_prefix=f"direct_share_{target_record['id']}",
+        )
+
+        st.markdown("---")
+        m1, m2 = st.columns([1, 4])
+        with m1:
+            if st.button("Save Changes", type="primary", use_container_width=True, key="dl_save_changes_btn", disabled=IS_VIEWER):
+                current_user_name = st.session_state["user_full_name"]
+                
+                # Process Inline Author Creation
+                final_contact_id = target_record.get('author_contact_id')
+                if author_sel == "Unassigned":
+                    final_contact_id = None
+                elif author_sel == "➕ Add New Contact...":
+                    if new_auth_name.strip() and new_auth_outlet.strip():
+                        new_c = supabase.table("media_contacts").insert({"full_name": new_auth_name.strip(), "outlet": new_auth_outlet.strip()}).execute()
+                        final_contact_id = new_c.data[0]['id']
+                else:
+                    final_contact_id = CONTACT_MAP[author_sel]
+
+                if edit_note.strip():
+                    add_action_note(target_record['id'], edit_note, current_user_name)
+                    
+                # Fire Notification if re-assigned
+                if edit_user != "Unassigned":
+                    send_assignment_notification(target_record['id'], target_record['title'], edit_user, current_user_name, edit_note)
+
+                supabase.table("mentions").update({
+                    "recommendation": edit_rec,
+                    "alert_level": edit_lvl,
+                    "status": edit_stat,
+                    "assigned_to_user": edit_user if edit_user != "Unassigned" else None,
+                    "author_contact_id": final_contact_id
+                }).eq("id", target_record['id']).execute()
+                st.rerun()
+        with m2:
+            if st.button("🗑 Permanent Deletion", type="secondary", key="dl_perm_delete_btn", disabled=IS_VIEWER):
+                delete_mention_record(target_record['id'])
+                st.query_params.clear()
+                st.rerun()
+    st.stop() # This entirely pauses the rest of the app from rendering while viewing a deep link!
+
+# --- 3. MODULE 1: INBOX / TRIAGE ---
+if app_mode == "📥 Inbox / Triage":
+    st.subheader("📥 Unprocessed Mention Queue")
+    st.write("Review, assign, and triage incoming raw tracking records. Use the checkboxes to delete items in bulk.")
+    
+    response = supabase.table("mentions").select("*").eq("status", "pending").order("date_published", desc=True).execute()
+    mentions = response.data
+    
+    if not mentions:
+        st.success("All caught up! No pending un-triaged mentions found in the queue.")
+    else:
+        pending_df = pd.DataFrame(mentions)
+        triage_display_cols = ["outlet_platform", "title", "date_published", "theme", "sentiment_category"]
+        
+        triage_selection = st.dataframe(
+            pending_df[triage_display_cols],
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="multi-row"
+        )
+        
+        selected_rows = triage_selection.get("selection", {}).get("rows", [])
+        
+        if len(selected_rows) > 0:
+            st.markdown(f"### 🛠️ Bulk Actions ({len(selected_rows)} items selected)")
+            bulk_c1, bulk_c2 = st.columns([1, 4])
+            with bulk_c1:
+                if st.button("🗑️ Bulk Delete Selected", type="primary", use_container_width=True):
+                    with st.spinner("Wiping items from queue..."):
+                        for row_idx in selected_rows:
+                            target_id = pending_df.iloc[row_idx]["id"]
+                            supabase.table("mentions").delete().eq("id", target_id).execute()
+                    st.toast(f"Successfully deleted {len(selected_rows)} mentions.")
+                    time.sleep(1)
+                    st.rerun()
+            st.markdown("---")
+            
+        st.markdown("### 📄 Detailed Classification Workspaces")
+        for m in mentions:
+            # INJECTED HTML ANCHOR TARGET FOR REPORT DEEP LINKS
+            st.markdown(f'<div id="{m["id"]}"></div>', unsafe_allow_html=True)
+            
+            with st.expander(f"🔍 {m['outlet_platform']} | {m['title']} (Published: {m['date_published']})"):
+                st.info(f"🤖 **Gemini Strategic Action Recommendation:** {m.get('ai_action_recommendation', 'N/A')}")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**URL:** [Open Source]({m['url']})")
+                    st.write(f"**Brands Affected:** {', '.join(m['brands_affected']) if m['brands_affected'] else 'None'}")
+                    st.write(f"**Theme:** {m['theme']}")
+                    st.write(f"**Snippet:** *\"{m['snippet']}\"*")
+                with col2:
+                    st.write(f"**Inferred Sentiment:** `{m['sentiment_category']}` (Score: {m['sentiment_score']})")
+                    st.write(f"**Rationale:** {m['sentiment_rationale']}")
+                    if m['naming_error_flag'] or m['data_conflict_flag']:
+                        st.warning(f"⚠️ **Quality Flag Raised:** {m['data_conflict_details'] or 'Branding variation error.'}")
+                
+                st.markdown("---")
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    new_rec = st.selectbox("Assign Action Item", ["monitor only", "engage", "share", "ignore"], index=0, key=f"rec_{m['id']}", disabled=IS_VIEWER)
+                with c2:
+                    new_level = st.selectbox("Assign Severity Level", ["Low", "Medium", "High", "Critical"], key=f"lvl_{m['id']}", disabled=IS_VIEWER)
+                with c3:
+                    assignee = st.selectbox("Assign to Team User", TEAM_USERS, key=f"user_{m['id']}", disabled=IS_VIEWER)
+                with c4:
+                    escalation_target = st.selectbox("If Escalated, Route to", TEAM_USERS, key=f"esc_{m['id']}", disabled=IS_VIEWER)
+                
+                note_text = st.text_input("Log Action Taken / Progress Note:", key=f"note_input_{m['id']}", placeholder="Type out workflow changes or notes here...", disabled=IS_VIEWER)
+                
+                # --- NEW AUTHOR ATTRIBUTION BLOCK ---
+                st.markdown("#### ✍️ Author Attribution")
+                current_auth_label = "Unassigned"
+                if m.get('author_contact_id'):
+                    match = next((c for c in MEDIA_CONTACTS if c['id'] == m['author_contact_id']), None)
+                    if match:
+                        current_auth_label = f"{match['full_name']} ({match['outlet']})"
+                
+                author_sel = st.selectbox("Assign to Media Contact", CONTACT_NAMES, index=CONTACT_NAMES.index(current_auth_label) if current_auth_label in CONTACT_NAMES else 0, key=f"auth_{m['id']}", disabled=IS_VIEWER)
+                
+                new_auth_name, new_auth_outlet = "", ""
+                if author_sel == "➕ Add New Contact...":
+                    a1, a2 = st.columns(2)
+                    with a1:
+                        new_auth_name = st.text_input("New Contact Name*", key=f"new_name_{m['id']}")
+                    with a2:
+                        new_auth_outlet = st.text_input("New Contact Outlet*", key=f"new_out_{m['id']}")
+                
+                st.markdown("---")
+                b1, b2, b3 = st.columns([2, 2, 1])
+                with b1:
+                    if st.button("Commit Classification & Update Status", key=f"btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
+                        determined_status = "escalated" if new_level in ["High", "Critical"] else "logged"
+                        current_user_name = st.session_state["user_full_name"]
+                        
+                        # Process Inline Author Creation
+                        final_contact_id = m.get('author_contact_id')
+                        if author_sel == "Unassigned":
+                            final_contact_id = None
+                        elif author_sel == "➕ Add New Contact...":
+                            if new_auth_name.strip() and new_auth_outlet.strip():
+                                new_c = supabase.table("media_contacts").insert({"full_name": new_auth_name.strip(), "outlet": new_auth_outlet.strip()}).execute()
+                                final_contact_id = new_c.data[0]['id']
+                        else:
+                            final_contact_id = CONTACT_MAP[author_sel]
+                        
+                        if note_text.strip():
+                            add_action_note(m['id'], f"Initial Triage Note: {note_text}", current_user_name)
+                        
+                        # Trigger the new notification
+                        if assignee != "Unassigned":
+                            send_assignment_notification(m['id'], m['title'], assignee, current_user_name, note_text)
+                        
+                        supabase.table("mentions").update({
+                            "recommendation": new_rec,
+                            "alert_level": new_level,
+                            "status": determined_status,
+                            "assigned_to_user": assignee if assignee != "Unassigned" else None,
+                            "escalated_to_user": escalation_target if escalation_target != "Unassigned" else None,
+                            "author_contact_id": final_contact_id
+                        }).eq("id", m['id']).execute()
+                        st.rerun()
+                with b2:
+                    if st.button("Add Progress Note Only", key=f"note_btn_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
+                        if note_text.strip():
+                            add_action_note(m['id'], note_text, current_user_name)
+                            st.rerun()
+                        else:
+                            st.error("Note text field cannot be blank.")
+                with b3:
+                    if st.button("🗑️ Delete Mention", key=f"del_{m['id']}", use_container_width=True, disabled=IS_VIEWER):
+                        delete_mention_record(m['id'])
+                        st.rerun()
+
+# --- MODULE 2: REVIEWED DATABASE TABLE ---
+elif app_mode == "📋 Reviewed Database Table":
+    st.subheader("📋 Reviewed Mentions Archive")
+    st.write("Use search filters to populate records by actual publication date. Click on any row to view details.")
+
+    f1, f2, f3, f4 = st.columns([2, 2, 3, 2])
+
+    with f1:
+        start_date = st.date_input(
+            "Start Date (Published)",
+            datetime.now().date() - timedelta(days=7),
+            key="reviewed_start_date",
+        )
+
+    with f2:
+        end_date = st.date_input(
+            "End Date (Published)",
+            datetime.now().date(),
+            key="reviewed_end_date",
+        )
+
+    with f3:
+        search_kw = st.text_input(
+            "Search Title or Snippet Keyword",
+            placeholder="Type a term...",
+            key="reviewed_search_kw",
+        )
+
+    with f4:
+        reviewed_owner_options = ["All", "Unassigned"] + [user for user in TEAM_USERS if user != "Unassigned"]
+        selected_assigned_user = st.selectbox(
+            "Assigned To",
+            reviewed_owner_options,
+            key="reviewed_assigned_user_filter",
+        )
+
+    query = (
+        supabase.table("mentions")
+        .select("*")
+        .in_("status", ["logged", "escalated", "resolved"])
+        .gte("date_published", start_date.isoformat())
+        .lte("date_published", end_date.isoformat())
+    )
+
+    if selected_assigned_user == "Unassigned":
+        query = query.is_("assigned_to_user", "null")
+    elif selected_assigned_user != "All":
+        query = query.eq("assigned_to_user", selected_assigned_user)
+
+    response = query.order("date_published", desc=True).execute()
+    reviewed_data = response.data
+
+    if not reviewed_data:
+        st.info("No reviewed tracking logs match the specified publication parameters.")
+    else:
+        df = pd.DataFrame(reviewed_data)
+
+        if search_kw:
+            df = df[
+                df["title"].str.contains(search_kw, case=False, na=False)
+                | df["snippet"].str.contains(search_kw, case=False, na=False)
+            ]
+
+        if df.empty:
+            st.warning("No records found matching that keyword combination.")
+        else:
+            display_columns = [
+                "date_published", "outlet_platform", "title", "theme",
+                "sentiment_category", "sentiment_score", "alert_level",
+                "status", "assigned_to_user", "escalated_to_user", "recommendation"
+            ]
+
+            selection = st.dataframe(
+                df[display_columns],
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row"
+            )
+            
+            st.markdown("---")
+            st.subheader("🛠️ Active Record Management & Notes Editor")
+            
+            if selection and len(selection.get("selection", {}).get("rows", [])) > 0:
+                selected_row_idx = selection["selection"]["rows"][0]
+                target_record = df.iloc[selected_row_idx].to_dict()
+                
+                # INJECTED HTML ANCHOR TARGET FOR REPORT LINKS
+                st.markdown(f'<div id="{target_record["id"]}"></div>', unsafe_allow_html=True)
+                
+                st.markdown(f"### 📄 Metadata Profile: `{target_record['title']}`")
+                st.info(f"🤖 **AI Strategic Action Recommendation for this Mention:** {target_record.get('ai_action_recommendation', 'N/A')}")
+                
+                meta_col1, meta_col2, meta_col3 = st.columns(3)
+                with meta_col1:
+                    st.markdown("**📌 Core Tracking Identifiers**")
+                    st.write(f"- **Discovered Date:** `{target_record['inserted_at']}`")
+                    st.write(f"- **Official Publication Date:** `{target_record['date_published']}`")
+                    st.write(f"- **Direct Source URL:** [Open Live Web Link]({target_record['url']})")
+                
+                with meta_col2:
+                    st.markdown("**🏷️ Corporate Context & Scope Tags**")
+                    st.write(f"- **Brands Explicitly Affected:** {', '.join(target_record['brands_affected']) if target_record['brands_affected'] else 'None mapped'}")
+                    st.write(f"- **Theme Classification:** `{target_record['theme']}`")
+                    st.write(f"- **Workflow State:** `{target_record['status']}`")
+                    st.write(f"- **Assigned Active Owner:** `{target_record['assigned_to_user'] or 'Unassigned'}`")
+                    st.write(f"- **Escalation Target Recipient:** `{target_record['escalated_to_user'] or 'None assigned'}`")
+                
+                with meta_col3:
+                    st.markdown("**🧠 Sentiment Metrics & Quality Flags**")
+                    st.write(f"- **Inferred Tone Category:** `{target_record['sentiment_category']}`")
+                    st.write(f"- **Sentiment Intensity Score (-1.0 to 1.0):** `{target_record['sentiment_score']}`")
+                    st.write(f"- **Action Recommendation Strategy:** `{target_record['recommendation']}`")
+                
+                st.markdown("**📝 Text Snippet & Analytical Explanations**")
+                st.write(f"**Raw Text Excerpt Snippet:** *\"{target_record['snippet']}\"*")
+                st.write(f"**AI Sentiment Rationale:** *{target_record['sentiment_rationale']}*")
+                
+                st.markdown("---")
+                st.markdown("#### 📜 Actions Taken & Notes History Trail")
+                actions_res = supabase.table("mention_actions").select("*").eq("mention_id", target_record['id']).order("inserted_at", desc=True).execute()
+                
+                if not actions_res.data:
+                    st.caption("No custom action notes logged for this profile yet.")
+                else:
+                    history_df = pd.DataFrame(actions_res.data)
+                    history_df = history_df.rename(columns={"inserted_at": "Timestamp", "performed_by": "User", "action_note": "Action Details"})
+                    st.table(history_df[["Timestamp", "User", "Action Details"]])
+                
+                st.markdown("#### ✏️ Update Classification & Append New Action Log")
+                e1, e2, e3, e4 = st.columns(4)
+                with e1:
+                    current_rec_idx = ["monitor only", "engage", "share", "ignore"].index(target_record['recommendation']) if target_record['recommendation'] in ["monitor only", "engage", "share", "ignore"] else 0
+                    edit_rec = st.selectbox("Action Recommendation", ["monitor only", "engage", "share", "ignore"], index=current_rec_idx, key="edit_rec", disabled=IS_VIEWER)
+                with e2:
+                    current_lvl_idx = ["Low", "Medium", "High", "Critical"].index(target_record['alert_level']) if target_record['alert_level'] in ["Low", "Medium", "High", "Critical"] else 0
+                    edit_lvl = st.selectbox("Severity Framework", ["Low", "Medium", "High", "Critical"], index=current_lvl_idx, key="edit_lvl", disabled=IS_VIEWER)
+                with e3:
+                    current_stat_idx = ["logged", "escalated", "resolved"].index(target_record['status']) if target_record['status'] in ["logged", "escalated", "resolved"] else 0
+                    edit_stat = st.selectbox("Workflow State", ["logged", "escalated", "resolved"], index=current_stat_idx, key="edit_stat", disabled=IS_VIEWER)
+                with e4:
+                    current_user = target_record['assigned_to_user'] if target_record['assigned_to_user'] in TEAM_USERS else "Unassigned"
+                    edit_user = st.selectbox("Reassign Owner", TEAM_USERS, index=TEAM_USERS.index(current_user), key="edit_user", disabled=IS_VIEWER)
+                    
+                edit_note = st.text_input("Type new action note to append to history trail:", key="edit_note_input", disabled=IS_VIEWER)
+                
+                # --- NEW AUTHOR ATTRIBUTION BLOCK ---
+                st.markdown("#### ✍️ Author Attribution")
+                current_auth_label = "Unassigned"
+                if target_record.get('author_contact_id'):
+                    match = next((c for c in MEDIA_CONTACTS if c['id'] == target_record['author_contact_id']), None)
+                    if match:
+                        current_auth_label = f"{match['full_name']} ({match['outlet']})"
+                
+                author_sel = st.selectbox("Assign to Media Contact", CONTACT_NAMES, index=CONTACT_NAMES.index(current_auth_label) if current_auth_label in CONTACT_NAMES else 0, key=f"edit_auth_{target_record['id']}", disabled=IS_VIEWER)
+                
+                new_auth_name, new_auth_outlet = "", ""
+                if author_sel == "➕ Add New Contact...":
+                    a1, a2 = st.columns(2)
+                    with a1:
+                        new_auth_name = st.text_input("New Contact Name*", key=f"edit_new_name_{target_record['id']}")
+                    with a2:
+                        new_auth_outlet = st.text_input("New Contact Outlet*", key=f"edit_new_out_{target_record['id']}")
+                
+                st.markdown("---")
+                render_share_mention_controls(
+                    mention=target_record,
+                    key_prefix=f"reviewed_share_{target_record['id']}",
+                )
+
+                st.markdown("---")
+                m1, m2 = st.columns([1, 4])
+                with m1:
+                    if st.button("Save Changes", type="primary", use_container_width=True, key="save_changes_btn", disabled=IS_VIEWER):
+                        current_user_name = st.session_state["user_full_name"]
+                        
+                        # Process Inline Author Creation
+                        final_contact_id = target_record.get('author_contact_id')
+                        if author_sel == "Unassigned":
+                            final_contact_id = None
+                        elif author_sel == "➕ Add New Contact...":
+                            if new_auth_name.strip() and new_auth_outlet.strip():
+                                new_c = supabase.table("media_contacts").insert({"full_name": new_auth_name.strip(), "outlet": new_auth_outlet.strip()}).execute()
+                                final_contact_id = new_c.data[0]['id']
+                        else:
+                            final_contact_id = CONTACT_MAP[author_sel]
+                            
+                        if edit_note.strip():
+                            add_action_note(target_record['id'], edit_note, current_user_name)
+                            
+                        # Trigger notification if reassigning or updating someone else's active ticket
+                        if edit_user != "Unassigned":
+                            send_assignment_notification(target_record['id'], target_record['title'], edit_user, current_user_name, edit_note)
+                            
+                        supabase.table("mentions").update({
+                            "recommendation": edit_rec,
+                            "alert_level": edit_lvl,
+                            "status": edit_stat,
+                            "assigned_to_user": edit_user if edit_user != "Unassigned" else None,
+                            "author_contact_id": final_contact_id
+                        }).eq("id", target_record['id']).execute()
+                        st.rerun()
+                with m2:
+                    if st.button("🗑 Permanent Deletion", type="secondary", key="perm_delete_btn", disabled=IS_VIEWER):
+                        delete_mention_record(target_record['id'])
+                        st.rerun()
+            else:
+                st.caption("💡 Click on any processed item row inside the tracking matrix above to reveal its parameters.")
+
+# --- MODULE 3: DAILY CRISIS CENTER ---
+elif app_mode == "🚨 Daily Crisis Center":
+    st.subheader("🚨 Daily Crisis Alert Generator")
+    response = supabase.table("mentions").select("*").in_("alert_level", ["High", "Critical"]).neq("status", "resolved").execute()
+    crisis_items = response.data
+    
+    if not crisis_items:
+        st.success("No high-severity or critical items require attention.")
+    else:
+        selected_title = st.selectbox("Select high-priority mention to format:", [c['title'] for c in crisis_items])
+        item = next(c for c in crisis_items if c['title'] == selected_title)
+        
+        subject_line = f"SUBJECT: [{item['alert_level'].upper()} RISK ALERT] {item['title']} - {item['date_published']}"
+        st.text_input("Recommended Subject Line", subject_line)
+        
+        markdown_body = f"""**Alert Level:** {item['alert_level']}
+**Brand(s) affected:** {', '.join(item['brands_affected'])}
+**Source:** {item['outlet_platform']} - [Source Link]({item['url']})
+**Assigned Owner:** {item['assigned_to_user'] or 'Unassigned'}
+**Escalated Recipient:** {item['escalated_to_user'] or 'None Specified'}
+
+### WHAT HAPPENED
+{item['snippet']}
+
+### WHY IT MATTERS
+* **Sentiment:** {item['sentiment_category']}
+* **Context Rationale:** {item['sentiment_rationale']}
+"""
+        st.text_area("Markdown Summary Text Content", markdown_body, height=300)
+
+# --- MODULE 4: AI REPORT BUILDER ---
+elif app_mode == "📝 Report Builder":
+    st.subheader("📝 Automated Executive Reporting")
+    st.write("Generate AI-driven summaries based on the raw tracking data in your database.")
+    
+    tab_daily, tab_weekly = st.tabs(["📅 Daily Triage Rollup", "🗓️ Weekly Trend Summary"])
+    
+    # --- DAILY REPORT TAB ---
+    with tab_daily:
+        st.markdown("### Generate Daily Media Report")
+        st.write("Compiles a summary of all items that were successfully processed and cleared from the inbox for a specific date.")
+        
+        target_date = st.date_input("Select Processing Date", datetime.now().date(), key="daily_date_picker")
+        
+        # Pull the custom daily prompt from Supabase
+        try:
+            tmpl_res = (
+                supabase.table("monitor_templates")
                 .select("*")
-                .order("created_at", desc=True)
+                .eq("template_name", "Daily Triage Rollup")
                 .execute()
             )
-            all_logs = logs_res.data if logs_res.data else []
+            stored_daily_instruction = (
+                tmpl_res.data[0]["system_instruction_prompt"]
+                if tmpl_res.data
+                else ""
+            )
         except Exception:
-            all_logs = []
+            stored_daily_instruction = ""
 
-        facility_logs = [
-            l for l in all_logs if l.get("horse_id") in facility_horse_ids
-        ]
-        horse_dict = {h["id"]: h for h in facility_horses}
+        daily_instruction = f"""
+{stored_daily_instruction}
 
-        if facility_logs:
-            invoice_rows = []
-            total_billed = 0.0
-            for l in facility_logs:
-                h = horse_dict.get(l.get("horse_id"), {})
-                fee = float(l.get("calculated_fee", 0))
-                total_billed += fee
-                invoice_rows.append({
-                    "Date": l.get("created_at", "")[:10],
-                    "Horse Name": h.get("name", "Unknown"),
-                    "Owner": h.get("owner_name", "Unknown"),
-                    "Modality": l.get("modality", ""),
-                    "Duration (Mins)": l.get("duration_minutes", 0),
-                    "Fee (CAD)": f"${fee:.2f}",
-                    "Notes": l.get("session_notes", ""),
-                })
+MANDATORY DAILY REPORT OUTPUT RULES:
+- Begin the report with a section titled exactly "## Executive Summary".
+- The Executive Summary must be 3 to 5 concise sentences written for senior
+  leadership.
+- Summarize the day's overall media volume, dominant themes, overall sentiment,
+  highest-priority issue, affected AIA Canada sub-brands, and any immediate
+  action required.
+- Do not list every mention in the Executive Summary.
+- Do not invent trends, risks, actions, or conclusions not supported by the
+  supplied records.
+- After the Executive Summary, continue with the detailed daily roundup using
+  the structure requested by the saved report template.
+- The supplied records have already been filtered for report eligibility.
+- Do not include, summarize, count, reference, or create a section for noise.
+- Do not create a section named "Filtered Noise".
+- Do not include records whose status is noise.
+- Do not include records whose recommendation is ignore.
+- Build the report only from the eligible records supplied in the user message.
+- If an earlier instruction conflicts with these output or exclusion rules,
+  these rules take precedence.
+"""
 
-            st.dataframe(pd.DataFrame(invoice_rows), use_container_width=True)
-            pdf_output = create_pdf_invoice(
-                chosen_barn_name, invoice_rows, total_billed
+        if st.button(
+            "Generate Daily Rollup",
+            use_container_width=True,
+            type="primary",
+            key="generate_daily_rollup",
+        ):
+            st.session_state.pop("latest_daily_report", None)
+
+            with st.spinner("Extracting records for the selected daily report..."):
+                try:
+                    daily_mentions = load_daily_report_mentions(target_date)
+
+                    if not daily_mentions:
+                        st.warning(
+                            "No mentions were inserted or explicitly included "
+                            "for this daily report date."
+                        )
+                    else:
+                        executive_summary_instruction = """
+You are the senior media monitoring analyst for AIA Canada.
+
+Write only the Executive Summary for a daily media report.
+
+Mandatory requirements:
+- Write 3 to 5 concise sentences for senior leadership.
+- State the total number of eligible mentions.
+- Identify the dominant themes and overall sentiment.
+- Identify the highest-priority issue, if one exists.
+- Name the affected AIA Canada sub-brands supported by the records.
+- State any immediate action required.
+- Do not include a heading.
+- Do not use bullet points or tables.
+- Do not mention noise, ignored records or excluded records.
+- Do not invent facts.
+"""
+
+                        summary_response = ai_client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=[
+                                (
+                                    f"Daily report date: {target_date.isoformat()}\n"
+                                    f"Eligible mention count: {len(daily_mentions)}\n\n"
+                                    f"Eligible daily media records:\n{daily_mentions}"
+                                )
+                            ],
+                            config=types.GenerateContentConfig(
+                                system_instruction=executive_summary_instruction
+                            ),
+                        )
+
+                        detail_response = ai_client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=[
+                                (
+                                    f"Daily report date: {target_date.isoformat()}\n\n"
+                                    "Prepare the detailed daily roundup from the eligible "
+                                    "records below. Do not mention noise or ignored records. "
+                                    "Do not create a Filtered Noise section.\n\n"
+                                    f"Eligible daily media records:\n{daily_mentions}"
+                                )
+                            ],
+                            config=types.GenerateContentConfig(
+                                system_instruction=daily_instruction
+                            ),
+                        )
+
+                        executive_summary = (
+                            summary_response.text.strip()
+                            if summary_response.text
+                            else (
+                                f"{len(daily_mentions)} eligible media mention(s) "
+                                "were included in this daily report. "
+                                "The available records did not produce an AI-generated "
+                                "executive summary."
+                            )
+                        )
+                        detailed_report = remove_existing_executive_summary(
+                            detail_response.text
+                        )
+
+                        final_report = (
+                            "## Executive Summary\n\n"
+                            f"{executive_summary}\n\n"
+                            f"{detailed_report}"
+                        ).strip()
+
+                        st.session_state["latest_daily_report"] = final_report
+                        st.success(
+                            f"Daily report generated from "
+                            f"{len(daily_mentions)} mention(s)."
+                        )
+                except Exception as exc:
+                    st.error(f"Daily report generation failed: {exc}")
+
+        if "latest_daily_report" in st.session_state:
+            st.markdown("---")
+            st.markdown(st.session_state["latest_daily_report"])
+
+    # --- WEEKLY REPORT TAB ---
+    with tab_weekly:
+        st.markdown("### Weekly Quantitative Trend Report")
+        st.write(
+            "Compare a selected seven-day period with the immediately preceding "
+            "seven days. Metrics are calculated directly from the mentions database."
+        )
+
+        weekly_end_date = st.date_input(
+            "Select Week Ending Date",
+            value=datetime.now().date(),
+            key="weekly_quantitative_end_date",
+        )
+        weekly_start_date = weekly_end_date - timedelta(days=6)
+        previous_end_date = weekly_start_date - timedelta(days=1)
+        previous_start_date = previous_end_date - timedelta(days=6)
+
+        st.caption(
+            f"Selected week: {weekly_start_date.isoformat()} through "
+            f"{weekly_end_date.isoformat()} | Previous week: "
+            f"{previous_start_date.isoformat()} through "
+            f"{previous_end_date.isoformat()}."
+        )
+
+        if st.button(
+            "Generate Quantitative Weekly Report",
+            use_container_width=True,
+            type="primary",
+            key="generate_quantitative_weekly_report",
+        ):
+            st.session_state.pop("weekly_quantitative_package", None)
+            st.session_state.pop("weekly_quantitative_pdf", None)
+
+            try:
+                with st.spinner("Calculating week-over-week media trends..."):
+                    current_records = fetch_reportable_mentions(
+                        weekly_start_date,
+                        weekly_end_date,
+                    )
+                    previous_records = fetch_reportable_mentions(
+                        previous_start_date,
+                        previous_end_date,
+                    )
+                    keyword_rows = load_monitoring_keywords()
+
+                    if not current_records and not previous_records:
+                        st.warning(
+                            "No reportable mentions were inserted during either "
+                            "comparison period."
+                        )
+                    else:
+                        package = build_weekly_quantitative_package(
+                            current_records=current_records,
+                            previous_records=previous_records,
+                            keyword_rows=keyword_rows,
+                            current_start=weekly_start_date,
+                            current_end=weekly_end_date,
+                            previous_start=previous_start_date,
+                            previous_end=previous_end_date,
+                        )
+
+                        package["ai_interpretation"] = (
+                            generate_weekly_quantitative_interpretation(package)
+                        )
+                        st.session_state["weekly_quantitative_package"] = package
+                        st.success(
+                            "Quantitative weekly report generated from "
+                            f"{len(current_records)} selected-week mention(s) and "
+                            f"{len(previous_records)} previous-week mention(s)."
+                        )
+            except Exception as exc:
+                st.error(f"Weekly quantitative report failed: {exc}")
+
+        if "weekly_quantitative_package" in st.session_state:
+            st.markdown("---")
+            render_weekly_quantitative_report(
+                st.session_state["weekly_quantitative_package"]
             )
-            st.download_button(
-                label="📄 Download Professional PDF Invoice",
-                data=bytes(pdf_output),
-                file_name=(
-                    f"EquusOS_Invoice_{chosen_barn_name.replace(' ', '_')}_{datetime.date.today()}.pdf"
-                ),
-                mime="application/pdf",
+            render_weekly_pdf_share_controls(
+                st.session_state["weekly_quantitative_package"]
             )
+
+# --- MODULE 5: DATABASE Q&A ASSISTANT ---
+elif app_mode == "💬 Ask AIA Media":
+    st.subheader("💬 Ask AIA Media")
+    st.write(
+        "Ask questions across all fields in the application database. "
+        "Optionally restrict timestamped records by date, or search the complete history."
+    )
+
+    use_date_filter = st.checkbox(
+        "Restrict timestamped records to a date range",
+        value=False,
+        key="ask_aia_use_date_filter",
+    )
+
+    ask_start_date = None
+    ask_end_date = None
+
+    if use_date_filter:
+        date_col1, date_col2 = st.columns(2)
+
+        with date_col1:
+            ask_start_date = st.date_input(
+                "Start insertion date",
+                value=datetime.now().date() - timedelta(days=7),
+                key="ask_aia_start_date",
+            )
+
+        with date_col2:
+            ask_end_date = st.date_input(
+                "End insertion date",
+                value=datetime.now().date(),
+                key="ask_aia_end_date",
+            )
+
+        st.caption(
+            "The range applies to inserted_at or created_at where those fields exist. "
+            "Reference tables without timestamps are included in full."
+        )
+
+    user_query = st.text_area(
+        "Enter your database question",
+        placeholder=(
+            "Examples: Which mentions required action last month? "
+            "Which reporters have open inquiries? "
+            "What actions were recorded for CCIF coverage?"
+        ),
+        key="ask_aia_query",
+        height=120,
+    )
+
+    if st.button(
+        "Search Complete Database",
+        type="primary",
+        use_container_width=True,
+        key="ask_aia_submit",
+    ):
+        if not user_query.strip():
+            st.error("Enter a question before searching.")
+        elif use_date_filter and ask_start_date > ask_end_date:
+            st.error("The start date cannot be after the end date.")
         else:
-            st.info(f"No treatment sessions on record for {chosen_barn_name}.")
+            try:
+                with st.spinner("Loading all matching rows and fields..."):
+                    database_context, table_errors = load_complete_ask_aia_context(
+                        use_date_filter=use_date_filter,
+                        start_date=ask_start_date,
+                        end_date=ask_end_date,
+                    )
 
-# ----------------------------------------------------
-# 20. CORRIDOR TRAVEL & FUEL EXPENSES
-# ----------------------------------------------------
-elif page == "Corridor Travel & Fuel Expenses":
-    st.title("🚗 Corridor Travel & Operational Expense Tracker")
-    st.markdown(
-        "Log travel expenses, track fuel and maintenance costs, and analyze net"
-        " profitability across regional corridors."
-    )
+                table_counts = {
+                    table_name: len(rows)
+                    for table_name, rows in database_context.items()
+                }
+                total_records = sum(table_counts.values())
 
-    try:
-        exp_res = (
-            supabase.table("corridor_expenses")
-            .select("*")
-            .order("expense_date", desc=True)
-            .execute()
-        )
-        all_expenses = exp_res.data if exp_res.data else []
-    except Exception:
-        all_expenses = []
+                if total_records == 0:
+                    st.warning("No database records matched the selected scope.")
+                else:
+                    context_chunks = split_database_context(database_context)
+                    progress = st.progress(0)
+                    status_text = st.empty()
+                    extracted_evidence: list[str] = []
 
-    try:
-        appts_res = supabase.table("appointments").select("travel_fee").execute()
-        total_travel_collected = (
-            sum(float(a.get("travel_fee", 0)) for a in appts_res.data)
-            if appts_res.data
-            else 0.0
-        )
-    except Exception:
-        total_travel_collected = 0.0
+                    for index, chunk_text in enumerate(context_chunks):
+                        status_text.write(
+                            f"Analysing database batch {index + 1} "
+                            f"of {len(context_chunks)}..."
+                        )
+                        extracted_evidence.append(
+                            analyse_database_chunk(
+                                user_question=user_query.strip(),
+                                chunk_text=chunk_text,
+                                chunk_number=index + 1,
+                                total_chunks=len(context_chunks),
+                            )
+                        )
+                        progress.progress((index + 1) / len(context_chunks))
 
-    total_expenses_logged = sum(float(e.get("amount", 0)) for e in all_expenses)
-    net_travel_margin = total_travel_collected - total_expenses_logged
+                    if use_date_filter:
+                        date_scope = (
+                            f"Timestamped records from {ask_start_date.isoformat()} "
+                            f"through {ask_end_date.isoformat()}; untimestamped "
+                            "reference tables included in full."
+                        )
+                    else:
+                        date_scope = (
+                            "Complete available application history; "
+                            "no date filter was applied."
+                        )
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total Expenses Logged", f"${total_expenses_logged:,.2f} CAD")
-    m2.metric("Mileage Fees Collected", f"${total_travel_collected:,.2f} CAD")
-    m3.metric(
-        "Net Travel Margin",
-        f"${net_travel_margin:,.2f} CAD",
-        delta=f"${net_travel_margin:,.2f}",
-        delta_color="normal" if net_travel_margin >= 0 else "inverse",
-    )
+                    status_text.write("Preparing final answer...")
+                    final_answer = generate_final_ask_aia_answer(
+                        user_question=user_query.strip(),
+                        extracted_evidence=extracted_evidence,
+                        table_counts=table_counts,
+                        table_errors=table_errors,
+                        date_scope=date_scope,
+                    )
 
-    with st.expander("⛽ Log Travel Expense", expanded=True):
-        with st.form("log_expense_form"):
-            e_date = st.date_input("Expense Date", datetime.date.today())
-            e_corridor = st.selectbox("Regional Corridor", [
-                "Monday: Ottawa Metro & Russell",
-                "Tuesday: Kingston Corridor (South)",
-                "Wednesday: Pembroke / Valley (North)",
-                "Thursday: Montreal Corridor (East)",
-                "Friday: Flagship Dedicated",
-                "General / Fleet Operations",
-            ])
-            e_category = st.selectbox("Expense Category", [
-                "Fuel",
-                "Vehicle Maintenance / Tires",
-                "Parking & Tolls",
-                "Equipment Consumables / Salt",
-                "Other Operational",
-            ])
-            e_amount = st.number_input(
-                "Amount (CAD)", min_value=0.0, step=5.0, value=75.0
+                    st.session_state["ask_aia_latest_answer"] = final_answer
+                    st.session_state["ask_aia_table_counts"] = table_counts
+                    st.session_state["ask_aia_table_errors"] = table_errors
+                    st.session_state["ask_aia_date_scope"] = date_scope
+
+                    status_text.empty()
+                    progress.empty()
+
+            except Exception as exc:
+                st.error(f"Ask AIA Media failed: {exc}")
+
+    if "ask_aia_latest_answer" in st.session_state:
+        st.markdown("---")
+        st.markdown("### Answer")
+        st.markdown(st.session_state["ask_aia_latest_answer"])
+
+        with st.expander("Database coverage used for this answer"):
+            st.write(st.session_state["ask_aia_date_scope"])
+
+            coverage_df = pd.DataFrame(
+                [
+                    {"Table": table_name, "Rows reviewed": row_count}
+                    for table_name, row_count
+                    in st.session_state["ask_aia_table_counts"].items()
+                ]
             )
-            e_receipt = st.text_input("Receipt Ref / Vendor Name (Optional)")
-            e_notes = st.text_area("Expense Notes")
+            st.dataframe(coverage_df, use_container_width=True, hide_index=True)
 
-            if st.form_submit_button("Record Operational Expense"):
-                if e_amount > 0:
-                    supabase.table("corridor_expenses").insert({
-                        "expense_date": str(e_date),
-                        "corridor": e_corridor,
-                        "category": e_category,
-                        "amount": float(e_amount),
-                        "receipt_ref": e_receipt,
-                        "notes": e_notes,
-                    }).execute()
-                    st.success(f"Recorded ${e_amount:.2f} CAD for {e_category} on {e_corridor}!")
+            table_errors = st.session_state.get("ask_aia_table_errors", {})
+            if table_errors:
+                st.warning("Some tables could not be read.")
+                for table_name, error_text in table_errors.items():
+                    st.write(f"- **{table_name}:** {error_text}")
+
+# --- MODULE 6: SYSTEM SETTINGS DASHBOARD ---
+elif app_mode == "⚙️ System Settings Dashboard":
+    st.subheader("⚙️ System Settings & Parameter Tuning Dashboard")
+    
+    tab_users, tab_keywords, tab_templates = st.tabs(["👥 User Accounts & Role Permissions", "🔑 Search Keywords & Phrases", "📝 AI Report Templates"])
+    
+    # 1. USER ACCOUNTS
+    with tab_users:
+        st.markdown("### 👥 Manage Active Platform Operators & Auth Credentials")
+        
+        if IS_ADMIN:
+            with st.form("create_user_security_form", clear_on_submit=True):
+                st.markdown("**Provision New Secured Account Profile**")
+                new_full_name = st.text_input("Full Display Name / Team Label")
+                new_email = st.text_input("Corporate Email Address")
+                new_password = st.text_input("Initial System Password", type="password")
+                new_role = st.selectbox("Access Privilege Scope", ["Administrator", "Editor", "Viewer"])
+                
+                if st.form_submit_button("Provision User Account"):
+                    if new_full_name.strip() and new_email.strip() and len(new_password) >= 6:
+                        try:
+                            # --- ADMIN OVERRIDE FOR USER CREATION ---
+                            # This bypasses the security blocker by using your Service Role Key
+                            admin_client = create_client(
+                                st.secrets["SUPABASE_URL"], 
+                                st.secrets["SUPABASE_SERVICE_ROLE_KEY"] 
+                            )
+                            
+                            auth_res = admin_client.auth.admin.create_user({
+                                "email": new_email,
+                                "password": new_password,
+                                "email_confirm": True
+                            })
+                            
+                            # Log them into your app's user dropdown roster
+                            supabase.table("monitor_users").insert({
+                                "user_id": auth_res.user.id,
+                                "full_name": new_full_name,
+                                "tracking_email": new_email,
+                                "user_role": new_role
+                            }).execute()
+                            
+                            st.success(f"Successfully provisioned login access for {new_full_name}!")
+                            st.rerun()
+                        except Exception as err:
+                            st.error(f"Provisioning Rejected: {err}")
+                    else:
+                        st.warning("All values must be filled. Passwords must be at least 6 characters.")
+        else:
+            st.info("ℹ️ Account provisioning frameworks are restricted to system Administrators.")
+
+        st.markdown("---")
+        st.markdown("### 🛠️ Profile Management & Security Resets")
+        u_res = supabase.table("monitor_users").select("*").order("full_name").execute()
+        auth_login_status = load_auth_login_status() if IS_ADMIN else {}
+
+        if u_res.data:
+            for current_row in u_res.data:
+                user_id = str(current_row["user_id"])
+                is_own_profile = (
+                    st.session_state.get("auth_user")
+                    and str(st.session_state["auth_user"].id) == user_id
+                )
+
+                if not IS_ADMIN and not is_own_profile:
+                    continue
+
+                auth_status = auth_login_status.get(user_id, {})
+                last_sign_in_at = auth_status.get("last_sign_in_at")
+                account_created_at = auth_status.get("created_at")
+                confirmed_at = auth_status.get("confirmed_at")
+                has_logged_in = bool(last_sign_in_at)
+
+                if is_own_profile:
+                    login_badge = "🟢 Current session"
+                elif has_logged_in:
+                    login_badge = "✅ Has logged in"
+                else:
+                    login_badge = "⚪ Never logged in"
+
+                with st.expander(
+                    f"👤 {current_row['full_name']} | "
+                    f"Role: {current_row['user_role']} | {login_badge}"
+                ):
+                    if IS_ADMIN:
+                        status_col1, status_col2, status_col3 = st.columns(3)
+
+                        with status_col1:
+                            st.metric(
+                                "Login status",
+                                "Logged in before" if has_logged_in else "Never logged in",
+                            )
+
+                        with status_col2:
+                            st.markdown("**Last successful login**")
+                            st.write(format_auth_timestamp(last_sign_in_at))
+
+                        with status_col3:
+                            st.markdown("**Auth account created**")
+                            st.write(format_auth_timestamp(account_created_at))
+
+                        if is_own_profile:
+                            st.success("This is the account currently signed into this app session.")
+
+                        if confirmed_at:
+                            st.caption(
+                                f"Account confirmed: {format_auth_timestamp(confirmed_at)}"
+                            )
+                        else:
+                            st.warning("No account confirmation timestamp is available.")
+
+                        st.markdown("---")
+
+                    col_e1, col_e2 = st.columns(2)
+
+                    with col_e1:
+                        role_options = ["Administrator", "Editor", "Viewer"]
+                        current_role = (
+                            current_row["user_role"]
+                            if current_row["user_role"] in role_options
+                            else "Viewer"
+                        )
+                        update_role_selection = st.selectbox(
+                            "Modify Privileges Role",
+                            role_options,
+                            index=role_options.index(current_role),
+                            key=f"edit_role_select_{current_row['id']}",
+                            disabled=not IS_ADMIN,
+                        )
+
+                        if st.button(
+                            "Overwrite Access Role",
+                            key=f"save_role_btn_{current_row['id']}",
+                            disabled=not IS_ADMIN,
+                        ):
+                            (
+                                supabase.table("monitor_users")
+                                .update({"user_role": update_role_selection})
+                                .eq("id", current_row["id"])
+                                .execute()
+                            )
+                            st.success("User privilege profile updated.")
+                            st.rerun()
+
+                    with col_e2:
+                        overwrite_password_string = st.text_input(
+                            "Overwrite Password / Force Reset",
+                            type="password",
+                            key=f"reset_pass_field_{current_row['id']}",
+                            placeholder="Type new credentials string...",
+                            disabled=not IS_ADMIN,
+                        )
+
+                        if st.button(
+                            "Deploy New Password Overwrite",
+                            key=f"save_pass_btn_{current_row['id']}",
+                            disabled=not IS_ADMIN,
+                        ):
+                            if len(overwrite_password_string) < 6:
+                                st.error("Password strings must be at least 6 characters.")
+                            else:
+                                try:
+                                    admin_client = create_client(
+                                        st.secrets["SUPABASE_URL"],
+                                        st.secrets["SUPABASE_SERVICE_ROLE_KEY"],
+                                    )
+                                    admin_client.auth.admin.update_user_by_id(
+                                        current_row["user_id"],
+                                        {"password": overwrite_password_string},
+                                    )
+                                    st.success("Security token updated successfully!")
+                                except Exception as pass_err:
+                                    st.error(f"Password overwrite failed: {pass_err}")
+
+                    if IS_ADMIN:
+                        st.markdown("---")
+                        if st.button(
+                            "❌ Terminate Account & Wipe Platform Data Logs",
+                            key=f"wipe_user_btn_{current_row['id']}",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            try:
+                                admin_client = create_client(
+                                    st.secrets["SUPABASE_URL"],
+                                    st.secrets["SUPABASE_SERVICE_ROLE_KEY"],
+                                )
+                                admin_client.auth.admin.delete_user(
+                                    current_row["user_id"]
+                                )
+                            except Exception as exc:
+                                st.warning(f"Auth account deletion warning: {exc}")
+
+                            (
+                                supabase.table("monitor_users")
+                                .delete()
+                                .eq("id", current_row["id"])
+                                .execute()
+                            )
+                            st.success("Account removed.")
+                            st.rerun()
+
+    # 2. KEYWORD MANAGEMENT LAYOUT
+    with tab_keywords:
+        st.markdown("### 🔑 Target Keyword Monitoring Framework")
+        
+        if IS_ADMIN:
+            col_single, col_bulk = st.columns(2)
+            
+            with col_single:
+                with st.form("add_kw_form", clear_on_submit=True):
+                    st.markdown("**Add Single Search Target Phrasing**")
+                    k_term = st.text_input("Exact Search Query Word/Phrase")
+                    k_brands = st.text_input("Associated Impact Brands (Comma Separated)")
+                    k_theme = st.text_input("Theme Layer Category")
+                    
+                    if st.form_submit_button("Commit Query to Search Engine Index"):
+                        if k_term.strip():
+                            brand_list = [b.strip() for b in k_brands.split(",") if b.strip()]
+                            try:
+                                supabase.table("monitor_keywords").insert({"term": k_term, "brand_tags": brand_list, "theme_layer": k_theme}).execute()
+                                st.success(f"Logged search query phrase: '{k_term}'")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed to index tracking term: {e}")
+            
+            with col_bulk:
+                st.markdown("**Bulk Upload Keywords from Excel**")
+                st.caption("Upload an .xlsx file with column headers: term, brand_tags, theme_layer.")
+                
+                uploaded_excel = st.file_uploader("Choose Excel File", type=["xlsx"])
+                if uploaded_excel is not None:
+                    try:
+                        excel_df = pd.read_excel(uploaded_excel)
+                        required_cols = {"term", "brand_tags", "theme_layer"}
+                        
+                        if not required_cols.issubset(excel_df.columns):
+                            st.error(f"Invalid columns. Required: term, brand_tags, theme_layer")
+                        else:
+                            st.dataframe(excel_df, use_container_width=True)
+                            
+                            if st.button("Confirm Bulk Ingestion Matrix into Database", type="primary", use_container_width=True):
+                                success_count = 0
+                                error_count = 0
+                                
+                                with st.spinner("Streaming rows safely into database engine ledger..."):
+                                    for idx, row in excel_df.iterrows():
+                                        term_val = str(row['term']).strip()
+                                        if not term_val or term_val == "nan":
+                                            continue
+                                        
+                                        raw_brands = str(row['brand_tags'])
+                                        brand_tags_list = [b.strip() for b in raw_brands.split(",") if b.strip() and b.lower() != "nan"]
+                                        theme_val = str(row['theme_layer']).strip() if str(row['theme_layer']).lower() != "nan" else "General"
+                                        
+                                        try:
+                                            supabase.table("monitor_keywords").upsert({
+                                                "term": term_val,
+                                                "brand_tags": brand_tags_list,
+                                                "theme_layer": theme_val
+                                            }, on_conflict="term").execute()
+                                            success_count += 1
+                                        except Exception:
+                                            error_count += 1
+                                            
+                                st.success(f"Bulk run finished! Registered {success_count} keywords. Errors: {error_count}")
+                                time.sleep(1.5)
+                                st.rerun()
+                    except Exception as parse_err:
+                        st.error(f"Failed to unpack Excel binary: {parse_err}")
+        else:
+            st.info("ℹ️ Search framework scope changes are restricted to system Administrators.")
+
+        st.markdown("---")
+        st.markdown("**Active Scraped Keywords Index Matrix**")
+        k_res = supabase.table("monitor_keywords").select("*").order("term").execute()
+        if k_res.data:
+            k_df = pd.DataFrame(k_res.data)
+            st.dataframe(k_df[["term", "brand_tags", "theme_layer"]], use_container_width=True, hide_index=True)
+            
+            if IS_ADMIN:
+                kw_to_del = st.selectbox("Select tracking query to delete:", [kw["term"] for kw in k_res.data])
+                if st.button("Permanently Remove Term From Scraper", type="primary"):
+                    supabase.table("monitor_keywords").delete().eq("term", kw_to_del).execute()
+                    st.success(f"Removed target query sequence: '{kw_to_del}'")
                     st.rerun()
 
-# ----------------------------------------------------
-# 21. EXECUTIVE P&L SNAPSHOT
-# ----------------------------------------------------
-elif page == "Executive P&L Snapshot":
-    st.title("📊 Executive P&L Financial Performance")
-    st.markdown(
-        "Comprehensive profit & loss income statement tracking gross session"
-        " revenue, travel fees, operating overhead, and maintenance sinking"
-        " reserves."
+    # 3. AI REPORT PROMPT TEMPLATE EDITOR
+    with tab_templates:
+        st.markdown("### 📝 AI Generation System Report Prompt Templates")
+        t_res = supabase.table("monitor_templates").select("*").order("template_name").execute()
+        
+        if t_res.data:
+            selected_tmpl_name = st.selectbox("Select a report template config to edit:", [t["template_name"] for t in t_res.data])
+            current_tmpl = next(t for t in t_res.data if t["template_name"] == selected_tmpl_name)
+            
+            if IS_ADMIN:
+                with st.form("edit_tmpl_form"):
+                    st.write(f"Editing Prompt Architecture for: **{selected_tmpl_name}**")
+                    updated_prompt_text = st.text_area("System Instruction Matrix Guidance Prompt", value=current_tmpl["system_instruction_prompt"], height=300)
+                    if st.form_submit_button("Overwrite System Prompt Template Details"):
+                        supabase.table("monitor_templates").update({
+                            "system_instruction_prompt": updated_prompt_text
+                        }).eq("template_name", selected_tmpl_name).execute()
+                        st.success("AI prompt configuration successfully updated!")
+                        st.rerun()
+            else:
+                st.info("ℹ️ AI generation structural system prompts are locked and read-only. Modifications are restricted to system Administrators.")
+                st.text_area("Current Active Blueprint Framework", value=current_tmpl["system_instruction_prompt"], height=250, disabled=True)
+
+# app.py
+elif app_mode == "📞 Media CRM & Inquiries":
+    st.subheader("📞 Media Relations CRM & Inquiry Tracker")
+    st.write("Manage reporter relationships, log incoming requests, and attribute published mentions to specific contacts.")
+
+    def normalize_joined_row(value):
+        if isinstance(value, list):
+            return value[0] if value else {}
+        if isinstance(value, dict):
+            return value
+        return {}
+
+    def get_contact_dependency_counts(contact_id):
+        mention_count = 0
+        inquiry_count = 0
+
+        try:
+            mention_res = (
+                supabase.table("mentions")
+                .select("id", count="exact")
+                .eq("author_contact_id", contact_id)
+                .execute()
+            )
+            mention_count = mention_res.count or 0
+        except Exception:
+            pass
+
+        try:
+            inquiry_res = (
+                supabase.table("media_inquiries")
+                .select("id", count="exact")
+                .eq("contact_id", contact_id)
+                .execute()
+            )
+            inquiry_count = inquiry_res.count or 0
+        except Exception:
+            pass
+
+        return mention_count, inquiry_count
+
+    def delete_contact(contact_id, force_unlink=False):
+        mention_count, inquiry_count = get_contact_dependency_counts(contact_id)
+
+        if not force_unlink and (mention_count > 0 or inquiry_count > 0):
+            raise ValueError("This contact is still linked to mentions or inquiries.")
+
+        if force_unlink:
+            if mention_count > 0:
+                (
+                    supabase.table("mentions")
+                    .update({"author_contact_id": None})
+                    .eq("author_contact_id", contact_id)
+                    .execute()
+                )
+
+            if inquiry_count > 0:
+                (
+                    supabase.table("media_inquiries")
+                    .update({"contact_id": None})
+                    .eq("contact_id", contact_id)
+                    .execute()
+                )
+
+        supabase.table("media_contacts").delete().eq("id", contact_id).execute()
+
+    crm_tab_inquiries, crm_tab_contacts, crm_tab_link = st.tabs(
+        ["📨 Active Inquiries", "📇 Media Rolodex", "🔗 Link Articles to Contacts"]
     )
 
-    try:
-        logs_res = supabase.table("treatment_logs").select("*").execute()
-        all_logs = logs_res.data if logs_res.data else []
-    except Exception:
-        all_logs = []
+    contacts_res = supabase.table("media_contacts").select("*").order("full_name").execute()
+    all_contacts = contacts_res.data if contacts_res.data else []
+    contact_options = {f"{c['full_name']} ({c['outlet']})": c["id"] for c in all_contacts}
 
-    try:
-        appts_res = supabase.table("appointments").select("*").execute()
-        all_appts = appts_res.data if appts_res.data else []
-    except Exception:
-        all_appts = []
+    with crm_tab_inquiries:
+        col_new_inq, col_active_inq = st.columns([1, 2])
 
-    try:
-        exp_res = supabase.table("corridor_expenses").select("*").execute()
-        all_expenses = exp_res.data if exp_res.data else []
-    except Exception:
-        all_expenses = []
+        with col_new_inq:
+            st.markdown("### 📝 Log New Inquiry")
 
-    gross_session_rev = sum(float(l.get("calculated_fee", 0)) for l in all_logs)
-    gross_travel_rev = sum(float(a.get("travel_fee", 0)) for a in all_appts)
-    total_gross_rev = gross_session_rev + gross_travel_rev
+            if not all_contacts:
+                st.warning("Please add a Media Contact in the Rolodex tab before logging an inquiry.")
+            else:
+                with st.form("crm_new_inquiry_form", clear_on_submit=True):
+                    selected_contact_label = st.selectbox(
+                        "Assign to Contact",
+                        list(contact_options.keys()),
+                        key="crm_new_inquiry_contact",
+                    )
+                    inq_subject = st.text_input("Request Subject / Topic", key="crm_new_inquiry_subject")
+                    inq_details = st.text_area("Request Details / Questions", key="crm_new_inquiry_details")
+                    inq_deadline = st.date_input("Deadline Date", key="crm_new_inquiry_deadline")
+                    inq_owner = st.selectbox("Assign to Team Member", TEAM_USERS, key="crm_new_inquiry_owner")
 
-    equitron_mins = sum(
-        int(l.get("duration_minutes", 0))
-        for l in all_logs
-        if l.get("modality") in ["Equitron-Pro (HECT)", "Peak Performance Combo"]
-    )
-    maintenance_reserve_allocation = equitron_mins * 0.12
+                    submitted_new_inquiry = st.form_submit_button("Log Inquiry & Notify Owner", type="primary")
 
-    total_operating_expenses = sum(
-        float(e.get("amount", 0)) for e in all_expenses
-    )
-    total_deductions_reserves = (
-        total_operating_expenses + maintenance_reserve_allocation
-    )
-    net_ebitda = total_gross_rev - total_deductions_reserves
-    profit_margin = (
-        (net_ebitda / total_gross_rev * 100) if total_gross_rev > 0 else 0.0
-    )
+                    if submitted_new_inquiry:
+                        if not inq_subject.strip():
+                            st.error("Subject is required.")
+                        else:
+                            contact_id = contact_options[selected_contact_label]
 
-    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-    col_f1.metric("Total Gross Revenue", f"${total_gross_rev:,.2f} CAD")
-    col_f2.metric("Operating Overhead", f"${total_operating_expenses:,.2f} CAD")
-    col_f3.metric(
-        "Maintenance Reserve Fund", f"${maintenance_reserve_allocation:,.2f} CAD"
-    )
-    col_f4.metric(
-        "Net EBITDA Profit",
-        f"${net_ebitda:,.2f} CAD",
-        delta=f"{profit_margin:.1f}% Margin",
-        delta_color="normal" if net_ebitda >= 0 else "inverse",
-    )
+                            (
+                                supabase.table("media_inquiries")
+                                .insert(
+                                    {
+                                        "contact_id": contact_id,
+                                        "inquiry_subject": inq_subject.strip(),
+                                        "inquiry_details": inq_details.strip() or None,
+                                        "deadline": inq_deadline.isoformat(),
+                                        "status": "pending",
+                                        "assigned_to_user": inq_owner if inq_owner != "Unassigned" else None,
+                                    }
+                                )
+                                .execute()
+                            )
 
-    st.divider()
-    pnl_data = [
-        {
-            "Line Item": "🟢 Equitron & Halo Session Revenue",
-            "Amount (CAD)": f"${gross_session_rev:,.2f}",
-        },
-        {
-            "Line Item": "🟢 Regional Travel & Mileage Collected",
-            "Amount (CAD)": f"${gross_travel_rev:,.2f}",
-        },
-        {
-            "Line Item": "👉 Total Gross Operating Revenue",
-            "Amount (CAD)": f"${total_gross_rev:,.2f}",
-        },
-        {
-            "Line Item": "🔴 Vehicle Fuel & Mobile Travel Expenses",
-            "Amount (CAD)": (
-                f"-${sum(float(e.get('amount', 0)) for e in all_expenses if e.get('category') == 'Fuel'):,.2f}"
-            ),
-        },
-        {
-            "Line Item": "🔴 Vehicle Upkeep & Tolls",
-            "Amount (CAD)": (
-                f"-${sum(float(e.get('amount', 0)) for e in all_expenses if e.get('category') in ['Vehicle Maintenance / Tires', 'Parking & Tolls']):,.2f}"
-            ),
-        },
-        {
-            "Line Item": "🔴 Consumables & General Overhead",
-            "Amount (CAD)": (
-                f"-${sum(float(e.get('amount', 0)) for e in all_expenses if e.get('category') in ['Equipment Consumables / Salt', 'Other Operational']):,.2f}"
-            ),
-        },
-        {
-            "Line Item": (
-                "🟡 Sinking Fund Reserve (22k-Min Recertification @ $0.12/min)"
-            ),
-            "Amount (CAD)": f"-${maintenance_reserve_allocation:,.2f}",
-        },
-        {
-            "Line Item": "🏁 Net Operating Profit (Pre-Tax EBITDA)",
-            "Amount (CAD)": f"${net_ebitda:,.2f}",
-        },
-    ]
-    st.dataframe(pd.DataFrame(pnl_data), use_container_width=True)
+                            if inq_owner != "Unassigned":
+                                send_assignment_notification(
+                                    None,
+                                    f"MEDIA INQUIRY: {inq_subject.strip()}",
+                                    inq_owner,
+                                    st.session_state["user_full_name"],
+                                    f"New request from {selected_contact_label}. Deadline: {inq_deadline.isoformat()}",
+                                )
 
-    csv_pnl = pd.DataFrame(pnl_data).to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="📥 Export P&L Financial Statement (CSV)",
-        data=csv_pnl,
-        file_name=f"EquusOS_PNL_Statement_{datetime.date.today()}.csv",
-        mime="text/csv",
-    )
+                            st.success("Inquiry logged successfully!")
+                            st.rerun()
+
+        with col_active_inq:
+            st.markdown("### 📨 Active Ticket Queue")
+
+            inq_res = (
+                supabase.table("media_inquiries")
+                .select("*, media_contacts(full_name, outlet)")
+                .neq("status", "resolved")
+                .order("deadline")
+                .execute()
+            )
+
+            active_inquiries = inq_res.data if inq_res.data else []
+
+            if not active_inquiries:
+                st.info("No active media inquiries at this time.")
+            else:
+                for inq in active_inquiries:
+                    contact_info = normalize_joined_row(inq.get("media_contacts"))
+                    contact_name = contact_info.get("full_name") or "Unknown"
+                    outlet = contact_info.get("outlet") or "Unknown"
+
+                    with st.expander(
+                        f"⏳ {str(inq.get('deadline', ''))[:10]} | {contact_name} ({outlet}) - {inq.get('inquiry_subject', 'Untitled')}"
+                    ):
+                        st.markdown("#### 📜 Activity & Notes History")
+                        hist_res = (
+                            supabase.table("inquiry_actions")
+                            .select("*")
+                            .eq("inquiry_id", inq["id"])
+                            .order("inserted_at", desc=True)
+                            .execute()
+                        )
+
+                        history_rows = hist_res.data if hist_res.data else []
+                        if not history_rows:
+                            st.caption("No notes logged for this inquiry yet.")
+                        else:
+                            hist_df = pd.DataFrame(history_rows).rename(
+                                columns={
+                                    "inserted_at": "Timestamp",
+                                    "performed_by": "User",
+                                    "action_note": "Note details",
+                                }
+                            )
+                            st.table(hist_df[["Timestamp", "User", "Note details"]])
+
+                        st.markdown("#### ✏️ Edit Ticket Details & Add Notes")
+                        edit_subj = st.text_input(
+                            "Subject",
+                            value=inq.get("inquiry_subject", ""),
+                            key=f"crm_inq_subject_{inq['id']}",
+                        )
+                        edit_det = st.text_area(
+                            "Details",
+                            value=inq.get("inquiry_details") or "",
+                            key=f"crm_inq_details_{inq['id']}",
+                        )
+
+                        col_a, col_b, col_c = st.columns(3)
+
+                        with col_a:
+                            try:
+                                current_deadline = datetime.fromisoformat(
+                                    str(inq["deadline"]).replace("Z", "+00:00")
+                                ).date()
+                            except Exception:
+                                current_deadline = datetime.now().date()
+
+                            edit_dl = st.date_input(
+                                "Deadline",
+                                value=current_deadline,
+                                key=f"crm_inq_deadline_{inq['id']}",
+                            )
+
+                        with col_b:
+                            status_options = ["pending", "in-progress", "resolved"]
+                            current_status = inq["status"] if inq.get("status") in status_options else "pending"
+                            edit_stat = st.selectbox(
+                                "Status",
+                                status_options,
+                                index=status_options.index(current_status),
+                                key=f"crm_inq_status_{inq['id']}",
+                            )
+
+                        with col_c:
+                            outcomes_list = [
+                                "Pending",
+                                "Interview Scheduled",
+                                "Mention Published",
+                                "Declined/Passed",
+                                "Other",
+                            ]
+                            current_outcome = inq.get("outcome") or "Pending"
+                            if current_outcome not in outcomes_list:
+                                outcomes_list.append(current_outcome)
+
+                            edit_out = st.selectbox(
+                                "Outcome",
+                                outcomes_list,
+                                index=outcomes_list.index(current_outcome),
+                                key=f"crm_inq_outcome_{inq['id']}",
+                            )
+
+                        col_d, col_e = st.columns(2)
+
+                        with col_d:
+                            current_owner = (
+                                inq.get("assigned_to_user")
+                                if inq.get("assigned_to_user") in TEAM_USERS
+                                else "Unassigned"
+                            )
+                            edit_owner = st.selectbox(
+                                "Assignee",
+                                TEAM_USERS,
+                                index=TEAM_USERS.index(current_owner),
+                                key=f"crm_inq_owner_{inq['id']}",
+                            )
+
+                        with col_e:
+                            new_note = st.text_input(
+                                "Log New Action/Note to History",
+                                key=f"crm_inq_note_{inq['id']}",
+                                placeholder="Type an update here...",
+                            )
+
+                        st.markdown("---")
+                        save_col, delete_col = st.columns([3, 1])
+
+                        with save_col:
+                            if st.button(
+                                "Save Ticket Changes & Post Note",
+                                key=f"crm_inq_save_{inq['id']}",
+                                type="primary",
+                                use_container_width=True,
+                            ):
+                                current_user_name = st.session_state["user_full_name"]
+
+                                if new_note.strip():
+                                    (
+                                        supabase.table("inquiry_actions")
+                                        .insert(
+                                            {
+                                                "inquiry_id": inq["id"],
+                                                "action_note": new_note.strip(),
+                                                "performed_by": current_user_name,
+                                            }
+                                        )
+                                        .execute()
+                                    )
+
+                                if edit_owner != "Unassigned" and edit_owner != current_owner:
+                                    send_assignment_notification(
+                                        None,
+                                        f"MEDIA INQUIRY: {edit_subj.strip()}",
+                                        edit_owner,
+                                        current_user_name,
+                                        f"Ticket assigned to you. Note: {new_note.strip() or 'No note added.'}",
+                                    )
+
+                                (
+                                    supabase.table("media_inquiries")
+                                    .update(
+                                        {
+                                            "inquiry_subject": edit_subj.strip(),
+                                            "inquiry_details": edit_det.strip() or None,
+                                            "deadline": edit_dl.isoformat(),
+                                            "status": edit_stat,
+                                            "outcome": edit_out,
+                                            "assigned_to_user": edit_owner if edit_owner != "Unassigned" else None,
+                                        }
+                                    )
+                                    .eq("id", inq["id"])
+                                    .execute()
+                                )
+
+                                st.toast("Ticket updated successfully!")
+                                st.rerun()
+
+                        with delete_col:
+                            if st.button(
+                                "🗑️ Delete",
+                                key=f"crm_inq_delete_{inq['id']}",
+                                type="secondary",
+                                use_container_width=True,
+                            ):
+                                supabase.table("media_inquiries").delete().eq("id", inq["id"]).execute()
+                                st.rerun()
+
+    with crm_tab_contacts:
+        add_col, profile_col = st.columns([1, 2])
+
+        with add_col:
+            st.markdown("### 📇 Add New Contact")
+
+            with st.form("crm_new_contact_form", clear_on_submit=True):
+                c_name = st.text_input("Full Name*", key="crm_contact_name")
+                c_outlet = st.text_input("Primary Outlet / Publication*", key="crm_contact_outlet")
+                c_email = st.text_input("Email Address", key="crm_contact_email")
+                c_phone = st.text_input("Phone Number", key="crm_contact_phone")
+                c_notes = st.text_area(
+                    "Background Notes (Bias, past interactions, beats)",
+                    key="crm_contact_notes",
+                )
+
+                submitted_new_contact = st.form_submit_button("Save Contact", type="primary")
+
+                if submitted_new_contact:
+                    if not c_name.strip() or not c_outlet.strip():
+                        st.error("Name and Outlet are required.")
+                    else:
+                        (
+                            supabase.table("media_contacts")
+                            .insert(
+                                {
+                                    "full_name": c_name.strip(),
+                                    "outlet": c_outlet.strip(),
+                                    "email": c_email.strip() or None,
+                                    "phone": c_phone.strip() or None,
+                                    "background_notes": c_notes.strip() or None,
+                                }
+                            )
+                            .execute()
+                        )
+                        st.success(f"{c_name.strip()} added to Rolodex!")
+                        st.rerun()
+
+        with profile_col:
+            st.markdown("### 📂 Contact Profiles & History")
+
+            if not all_contacts:
+                st.info("Rolodex is currently empty. Add a contact on the left to begin building profiles.")
+            else:
+                selected_profile_label = st.selectbox(
+                    "Search / Select a Contact Profile",
+                    list(contact_options.keys()),
+                    key="crm_contact_profile_select",
+                )
+                profile_id = contact_options[selected_profile_label]
+                profile_data = next((c for c in all_contacts if c["id"] == profile_id), None)
+
+                if profile_data:
+                    st.markdown(f"#### 👤 {profile_data['full_name']} ({profile_data['outlet']})")
+                    st.write(
+                        f"📧 **Email:** {profile_data.get('email') or 'N/A'} | "
+                        f"📞 **Phone:** {profile_data.get('phone') or 'N/A'}"
+                    )
+                    st.caption(f"**Internal Notes:** {profile_data.get('background_notes') or 'None provided.'}")
+
+                    st.markdown("---")
+                    st.markdown("### ✏️ Edit Contact")
+
+                    with st.form(f"crm_edit_contact_form_{profile_id}"):
+                        edit_name = st.text_input(
+                            "Full Name*",
+                            value=profile_data.get("full_name", ""),
+                            key=f"crm_edit_contact_name_{profile_id}",
+                        )
+                        edit_outlet = st.text_input(
+                            "Primary Outlet / Publication*",
+                            value=profile_data.get("outlet", ""),
+                            key=f"crm_edit_contact_outlet_{profile_id}",
+                        )
+                        edit_email = st.text_input(
+                            "Email Address",
+                            value=profile_data.get("email") or "",
+                            key=f"crm_edit_contact_email_{profile_id}",
+                        )
+                        edit_phone = st.text_input(
+                            "Phone Number",
+                            value=profile_data.get("phone") or "",
+                            key=f"crm_edit_contact_phone_{profile_id}",
+                        )
+                        edit_notes = st.text_area(
+                            "Background Notes (Bias, past interactions, beats)",
+                            value=profile_data.get("background_notes") or "",
+                            key=f"crm_edit_contact_notes_{profile_id}",
+                        )
+
+                        submitted_edit_contact = st.form_submit_button("Save Contact Changes", type="primary")
+
+                        if submitted_edit_contact:
+                            if not edit_name.strip() or not edit_outlet.strip():
+                                st.error("Name and Outlet are required.")
+                            else:
+                                (
+                                    supabase.table("media_contacts")
+                                    .update(
+                                        {
+                                            "full_name": edit_name.strip(),
+                                            "outlet": edit_outlet.strip(),
+                                            "email": edit_email.strip() or None,
+                                            "phone": edit_phone.strip() or None,
+                                            "background_notes": edit_notes.strip() or None,
+                                        }
+                                    )
+                                    .eq("id", profile_id)
+                                    .execute()
+                                )
+                                st.success("Contact updated successfully!")
+                                st.rerun()
+
+                    st.markdown("---")
+                    st.markdown("### 🗑️ Remove Contact")
+
+                    mentions_count, inquiries_count = get_contact_dependency_counts(profile_id)
+                    st.caption(
+                        f"This contact is linked to {mentions_count} mention(s) and {inquiries_count} inquiry record(s)."
+                    )
+
+                    delete_mode = st.radio(
+                        "Delete mode",
+                        [
+                            "Block delete if linked records exist",
+                            "Force delete and unlink related records",
+                        ],
+                        key=f"crm_delete_mode_{profile_id}",
+                    )
+                    confirm_delete = st.checkbox(
+                        "I understand this action cannot be undone.",
+                        key=f"crm_confirm_delete_{profile_id}",
+                    )
+
+                    if st.button(
+                        "Delete Contact",
+                        key=f"crm_delete_contact_{profile_id}",
+                        type="secondary",
+                        use_container_width=True,
+                    ):
+                        if not confirm_delete:
+                            st.error("Please confirm deletion first.")
+                        else:
+                            try:
+                                force_unlink = delete_mode == "Force delete and unlink related records"
+                                delete_contact(profile_id, force_unlink=force_unlink)
+                                message = (
+                                    "Contact deleted and related records unlinked successfully!"
+                                    if force_unlink
+                                    else "Contact deleted successfully!"
+                                )
+                                st.success(message)
+                                st.rerun()
+                            except ValueError as e:
+                                st.error(str(e))
+                            except Exception as e:
+                                st.error(f"Failed to delete contact: {e}")
+
+                    st.markdown("---")
+                    st.markdown("#### 📨 Inquiry History")
+
+                    inq_hist_res = (
+                        supabase.table("media_inquiries")
+                        .select("*")
+                        .eq("contact_id", profile_id)
+                        .order("deadline", desc=True)
+                        .execute()
+                    )
+                    inquiry_history = inq_hist_res.data if inq_hist_res.data else []
+
+                    if not inquiry_history:
+                        st.info("No inquiries logged for this contact.")
+                    else:
+                        for inq in inquiry_history:
+                            status_icon = (
+                                "🟢"
+                                if inq.get("status") == "resolved"
+                                else "🟡"
+                                if inq.get("status") == "in-progress"
+                                else "🔴"
+                            )
+
+                            with st.expander(
+                                f"{status_icon} [{str(inq.get('status', 'pending')).upper()}] "
+                                f"{str(inq.get('deadline', ''))[:10]} - {inq.get('inquiry_subject', 'Untitled')}"
+                            ):
+                                st.write(f"**Details:** {inq.get('inquiry_details') or 'No details provided.'}")
+
+                                h_col1, h_col2, h_col3 = st.columns(3)
+
+                                with h_col1:
+                                    hist_status_options = ["pending", "in-progress", "resolved"]
+                                    hist_status = inq["status"] if inq.get("status") in hist_status_options else "pending"
+                                    edit_inq_stat = st.selectbox(
+                                        "Update Status",
+                                        hist_status_options,
+                                        index=hist_status_options.index(hist_status),
+                                        key=f"crm_hist_status_{inq['id']}",
+                                    )
+
+                                with h_col2:
+                                    current_hist_owner = (
+                                        inq.get("assigned_to_user")
+                                        if inq.get("assigned_to_user") in TEAM_USERS
+                                        else "Unassigned"
+                                    )
+                                    edit_inq_owner = st.selectbox(
+                                        "Assignee",
+                                        TEAM_USERS,
+                                        index=TEAM_USERS.index(current_hist_owner),
+                                        key=f"crm_hist_owner_{inq['id']}",
+                                    )
+
+                                with h_col3:
+                                    inq_note = st.text_input(
+                                        "Ping Note to Assignee (Optional)",
+                                        key=f"crm_hist_note_{inq['id']}",
+                                    )
+
+                                if st.button(
+                                    "Save & Notify Team",
+                                    key=f"crm_hist_save_{inq['id']}",
+                                    use_container_width=True,
+                                ):
+                                    current_user_name = st.session_state["user_full_name"]
+
+                                    (
+                                        supabase.table("media_inquiries")
+                                        .update(
+                                            {
+                                                "status": edit_inq_stat,
+                                                "assigned_to_user": edit_inq_owner if edit_inq_owner != "Unassigned" else None,
+                                            }
+                                        )
+                                        .eq("id", inq["id"])
+                                        .execute()
+                                    )
+
+                                    if edit_inq_owner != "Unassigned":
+                                        ping_msg = inq_note.strip() or f"Inquiry status updated to {edit_inq_stat}."
+                                        send_assignment_notification(
+                                            None,
+                                            f"MEDIA INQUIRY: {inq.get('inquiry_subject', 'Untitled')}",
+                                            edit_inq_owner,
+                                            current_user_name,
+                                            ping_msg,
+                                        )
+
+                                    st.toast("Inquiry updated successfully!")
+                                    st.rerun()
+
+                    st.markdown("#### 📰 Published Articles Linked")
+
+                    mentions_hist_res = (
+                        supabase.table("mentions")
+                        .select("title, outlet_platform, date_published, url")
+                        .eq("author_contact_id", profile_id)
+                        .order("date_published", desc=True)
+                        .execute()
+                    )
+                    linked_mentions = mentions_hist_res.data if mentions_hist_res.data else []
+
+                    if not linked_mentions:
+                        st.caption("No articles have been linked to this author yet.")
+                    else:
+                        for mh in linked_mentions:
+                            st.markdown(
+                                f"- **{mh.get('date_published', '')}** | "
+                                f"[{mh.get('title', 'Untitled')}]({mh.get('url', '#')}) - "
+                                f"*{mh.get('outlet_platform', 'Unknown')}*"
+                            )
+
+    with crm_tab_link:
+        st.markdown("### 🔗 Attribute Mentions to Reporters")
+        st.write("Link a published article in your database to a specific media contact, or manually log coverage that the automated scraper missed.")
+
+        col_link, col_manual = st.columns(2)
+
+        with col_link:
+            st.markdown("#### 📡 Link Existing Scraped Article")
+            search_unlinked = st.text_input(
+                "🔍 Search Unlinked Articles",
+                placeholder="Type a keyword from the title...",
+                key="crm_search_unlinked_articles",
+            )
+
+            query = (
+                supabase.table("mentions")
+                .select("id, title, outlet_platform, date_published")
+                .is_("author_contact_id", "null")
+            )
+            if search_unlinked:
+                query = query.ilike("title", f"%{search_unlinked.strip()}%")
+
+            unlinked_res = query.order("date_published", desc=True).limit(50).execute()
+            unlinked_mentions = unlinked_res.data if unlinked_res.data else []
+
+            if not unlinked_mentions:
+                st.success("No unlinked mentions found matching that search!")
+            else:
+                with st.form("crm_link_existing_article_form"):
+                    mention_options = {
+                        f"{m['date_published']} | {m['outlet_platform']} - {m['title'][:35]}...": m["id"]
+                        for m in unlinked_mentions
+                    }
+                    selected_mention_label = st.selectbox(
+                        "Select Unlinked Article",
+                        list(mention_options.keys()),
+                        key="crm_link_existing_article_select",
+                    )
+                    selected_author_label = st.selectbox(
+                        "Select Author from Rolodex",
+                        list(contact_options.keys()),
+                        key="crm_link_existing_author_select",
+                    )
+
+                    submitted_link_existing = st.form_submit_button(
+                        "🔗 Link Article to Author",
+                        type="primary",
+                        use_container_width=True,
+                    )
+
+                    if submitted_link_existing:
+                        mention_id = mention_options[selected_mention_label]
+                        contact_id = contact_options[selected_author_label]
+                        (
+                            supabase.table("mentions")
+                            .update({"author_contact_id": contact_id})
+                            .eq("id", mention_id)
+                            .execute()
+                        )
+                        st.toast("Article successfully linked to contact!")
+                        st.rerun()
+
+        with col_manual:
+            st.markdown("#### ➕ Manually Add Missing Article")
+
+            if not all_contacts:
+                st.info("Rolodex contacts are required to assign authorship.")
+            else:
+                with st.form("crm_manual_mention_form", clear_on_submit=True):
+                    m_title = st.text_input("Article Title*", key="crm_manual_title")
+                    m_url = st.text_input("Article URL Link*", key="crm_manual_url")
+                    m_outlet = st.text_input("Outlet / Platform Name*", key="crm_manual_outlet")
+                    m_date = st.date_input("Date Published", key="crm_manual_date")
+                    m_author_label = st.selectbox("Author / Contact", list(contact_options.keys()), key="crm_manual_author")
+                    m_snippet = st.text_area("Snippet / Key Quotes (Optional)", key="crm_manual_snippet")
+
+                    submitted_manual_mention = st.form_submit_button(
+                        "Save & Link Manual Article",
+                        type="primary",
+                        use_container_width=True,
+                    )
+
+                    if submitted_manual_mention:
+                        if not m_title.strip() or not m_url.strip() or not m_outlet.strip():
+                            st.error("Title, URL, and Outlet are required fields.")
+                        else:
+                            contact_id = contact_options[m_author_label]
+                            (
+                                supabase.table("mentions")
+                                .insert(
+                                    {
+                                        "title": m_title.strip(),
+                                        "url": m_url.strip(),
+                                        "outlet_platform": m_outlet.strip(),
+                                        "date_published": m_date.isoformat(),
+                                        "snippet": m_snippet.strip() or None,
+                                        "author_contact_id": contact_id,
+                                        "status": "logged",
+                                        "recommendation": "monitor only",
+                                        "sentiment_category": "Neutral",
+                                        "sentiment_score": 0.0,
+                                        "sentiment_rationale": "Manually logged by team member.",
+                                        "ai_action_recommendation": "Manual entry — tracking for relationship management.",
+                                    }
+                                )
+                                .execute()
+                            )
+                            st.success("Manual article saved and linked successfully!")
+                            st.rerun()
