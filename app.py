@@ -1953,7 +1953,7 @@ def send_report_via_gmail(
 
     sender_email = st.secrets.get(
         "GMAIL_SENDER_EMAIL",
-        "aiaofcanada@gmail.com",
+        "aiaocanadamedia@gmail.com",
     )
     app_password = st.secrets.get("GMAIL_APP_PASSWORD")
 
@@ -2259,7 +2259,7 @@ def render_daily_gmail_share_controls(
         )
 
     st.caption(
-        "Email is sent directly from aiaofcanada@gmail.com with the PDF attached."
+        "Email is sent directly from aiacanadamedia@gmail.com with the PDF attached."
     )
 
 
@@ -2391,7 +2391,7 @@ def render_weekly_pdf_share_controls(package: dict) -> None:
         )
 
     st.caption(
-        "Email is sent directly from aiaofcanada@gmail.com with the PDF attached."
+        "Email is sent directly from aiacanadamedia@gmail.com with the PDF attached."
     )
 
 
