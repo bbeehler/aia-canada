@@ -5,6 +5,9 @@ import os
 import re
 import time
 import json
+import smtplib
+import ssl
+from email.message import EmailMessage
 from datetime import datetime, timedelta, time as datetime_time
 from typing import Any
 from urllib.parse import quote
@@ -1917,49 +1920,353 @@ def build_weekly_trend_pdf(package: dict) -> bytes:
     return buffer.getvalue()
 
 
-def build_weekly_report_mailto(
-    package: dict,
-    recipients: list[str],
-    additional_message: str = "",
-) -> str:
-    """Build an Outlook-ready email draft for a weekly PDF report."""
-    clean_recipients = []
-    seen = set()
-    for email in recipients:
-        email = str(email or "").strip()
-        if not email or email.lower() in seen:
-            continue
-        seen.add(email.lower())
-        clean_recipients.append(email)
 
-    metrics = package.get("metrics") or {}
-    subject = f"AIA Canada Weekly Media Trend Report — {package.get('current_period', '')}"
-    standard_message = (
-        additional_message.strip()
-        or "Hello,\n\nPlease find attached the AIA Canada Weekly Quantitative Media Trend Report."
+def _normalize_email_addresses(addresses: list[str]) -> list[str]:
+    """Normalize and de-duplicate recipient addresses."""
+    cleaned = []
+    seen = set()
+
+    for address in addresses:
+        value = str(address or "").strip()
+        if not value:
+            continue
+        lowered = value.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        cleaned.append(value)
+
+    return cleaned
+
+
+def send_report_via_gmail(
+    recipients: list[str],
+    subject: str,
+    body: str,
+    pdf_bytes: bytes,
+    filename: str,
+) -> None:
+    """Send a PDF report through the dedicated Gmail account using SMTP."""
+    clean_recipients = _normalize_email_addresses(recipients)
+    if not clean_recipients:
+        raise ValueError("At least one recipient email address is required.")
+
+    sender_email = st.secrets.get(
+        "GMAIL_SENDER_EMAIL",
+        "aiaofcanada@gmail.com",
     )
-    body = (
-        f"{standard_message}\n\n"
-        f"Reporting period: {package.get('current_period', '')}\n"
-        f"Comparison period: {package.get('previous_period', '')}\n"
-        f"Mention volume: {metrics.get('current_volume', 0)}\n"
-        f"Average sentiment: {metrics.get('current_average_sentiment', 0):.2f}\n"
-        f"High/Critical mentions: {metrics.get('current_high_priority', 0)}\n\n"
-        "The PDF must be downloaded from the Media Monitor and attached to this draft before sending.\n\n"
-        "Regards,\nAIA Canada"
+    app_password = st.secrets.get("GMAIL_APP_PASSWORD")
+
+    if not app_password:
+        raise RuntimeError(
+            "GMAIL_APP_PASSWORD is missing from Streamlit Secrets."
+        )
+
+    message = EmailMessage()
+    message["From"] = sender_email
+    message["To"] = ", ".join(clean_recipients)
+    message["Subject"] = subject
+    message.set_content(body)
+    message.add_attachment(
+        pdf_bytes,
+        maintype="application",
+        subtype="pdf",
+        filename=filename,
     )
-    recipient_string = ",".join(clean_recipients)
-    return (
-        f"mailto:{quote(recipient_string, safe='@,')}"
-        f"?subject={quote(subject)}"
-        f"&body={quote(body)}"
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL(
+        "smtp.gmail.com",
+        465,
+        context=context,
+        timeout=30,
+    ) as smtp:
+        smtp.login(sender_email, app_password)
+        smtp.send_message(message)
+
+
+def build_daily_report_pdf(report_text: str, report_date) -> bytes:
+    """Create a PDF from the generated Daily Media Report."""
+    buffer = BytesIO()
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=42,
+        leftMargin=42,
+        topMargin=42,
+        bottomMargin=42,
+        title="AIA Canada Daily Media Report",
+        author="AIA Canada Media Monitor",
+    )
+
+    styles = getSampleStyleSheet()
+    styles.add(
+        ParagraphStyle(
+            name="DailyReportTitle",
+            parent=styles["Title"],
+            fontSize=18,
+            leading=22,
+            spaceAfter=12,
+            alignment=TA_CENTER,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="DailyReportDate",
+            parent=styles["Normal"],
+            fontSize=9,
+            leading=12,
+            textColor=colors.HexColor("#555555"),
+            alignment=TA_CENTER,
+            spaceAfter=18,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="DailyHeading2",
+            parent=styles["Heading2"],
+            fontSize=13,
+            leading=16,
+            spaceBefore=8,
+            spaceAfter=6,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="DailyHeading3",
+            parent=styles["Heading3"],
+            fontSize=11,
+            leading=14,
+            spaceBefore=6,
+            spaceAfter=4,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="DailyBody",
+            parent=styles["BodyText"],
+            fontSize=9.5,
+            leading=13,
+            spaceAfter=5,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="DailyBullet",
+            parent=styles["BodyText"],
+            fontSize=9.5,
+            leading=13,
+            leftIndent=14,
+            firstLineIndent=-7,
+            spaceAfter=3,
+        )
+    )
+
+    story = [
+        Paragraph(
+            "AIA Canada Daily Media Report",
+            styles["DailyReportTitle"],
+        ),
+        Paragraph(
+            f"Report date: {_pdf_safe(report_date)}",
+            styles["DailyReportDate"],
+        ),
+    ]
+
+    for raw_line in str(report_text or "").splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            story.append(Spacer(1, 5))
+            continue
+
+        if line.startswith("## "):
+            story.append(
+                Paragraph(
+                    _pdf_safe(line[3:].strip()),
+                    styles["DailyHeading2"],
+                )
+            )
+            continue
+
+        if line.startswith("### "):
+            story.append(
+                Paragraph(
+                    _pdf_safe(line[4:].strip()),
+                    styles["DailyHeading3"],
+                )
+            )
+            continue
+
+        if line.startswith(("- ", "* ")):
+            bullet_text = line[2:].strip()
+            story.append(
+                Paragraph(
+                    f"• {_pdf_safe(bullet_text)}",
+                    styles["DailyBullet"],
+                )
+            )
+            continue
+
+        # Preserve readable text while avoiding raw Markdown syntax in the PDF.
+        cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
+        cleaned = re.sub(r"\[(.*?)\]\((.*?)\)", r"\1 — \2", cleaned)
+        story.append(
+            Paragraph(
+                _pdf_safe(cleaned),
+                styles["DailyBody"],
+            )
+        )
+
+    def add_page_number(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#666666"))
+        canvas.drawString(42, 22, "AIA Canada Media Monitor")
+        canvas.drawRightString(
+            letter[0] - 42,
+            22,
+            f"Page {doc.page}",
+        )
+        canvas.restoreState()
+
+    document.build(
+        story,
+        onFirstPage=add_page_number,
+        onLaterPages=add_page_number,
+    )
+    return buffer.getvalue()
+
+
+def render_daily_gmail_share_controls(
+    report_text: str,
+    report_date,
+) -> None:
+    """Render Daily Report PDF download and Gmail send controls."""
+    st.markdown("---")
+    st.markdown("### 📧 Export and Email Daily Report")
+
+    cache_key = f"daily_report_pdf_{report_date.isoformat()}"
+    pdf_bytes = st.session_state.get(cache_key)
+
+    if not pdf_bytes:
+        try:
+            pdf_bytes = build_daily_report_pdf(
+                report_text=report_text,
+                report_date=report_date,
+            )
+            st.session_state[cache_key] = pdf_bytes
+        except Exception as exc:
+            st.error(f"Unable to generate Daily Report PDF: {exc}")
+            return
+
+    filename = (
+        f"AIA_Canada_Daily_Media_Report_"
+        f"{report_date.isoformat()}.pdf"
+    )
+
+    st.download_button(
+        "Download Daily Report PDF",
+        data=pdf_bytes,
+        file_name=filename,
+        mime="application/pdf",
+        use_container_width=True,
+        key=f"download_daily_report_pdf_{report_date.isoformat()}",
+    )
+
+    registered_recipients = load_registered_email_recipients()
+    recipient_map = {
+        recipient["label"]: recipient["email"]
+        for recipient in registered_recipients
+    }
+
+    selected_labels = st.multiselect(
+        "Select registered recipients",
+        options=list(recipient_map.keys()),
+        key=f"daily_report_email_recipients_{report_date.isoformat()}",
+        placeholder="Select SLT members or other registered users",
+    )
+
+    additional_addresses = st.text_input(
+        "Additional email addresses",
+        key=f"daily_report_additional_recipients_{report_date.isoformat()}",
+        placeholder="external@example.com, another@example.com",
+        help="Separate multiple addresses with commas or semicolons.",
+    )
+
+    default_subject = (
+        f"AIA Canada Daily Media Report — {report_date.isoformat()}"
+    )
+    email_subject = st.text_input(
+        "Email subject",
+        value=default_subject,
+        key=f"daily_report_email_subject_{report_date.isoformat()}",
+    )
+
+    email_message = st.text_area(
+        "Email message",
+        value=(
+            "Hello,\n\n"
+            "Please find attached the AIA Canada Daily Media Report "
+            f"for {report_date.isoformat()}.\n\n"
+            "Regards,\n"
+            "AIA Canada"
+        ),
+        height=140,
+        key=f"daily_report_email_message_{report_date.isoformat()}",
+    )
+
+    selected_emails = [
+        recipient_map[label]
+        for label in selected_labels
+    ]
+    extra_emails = [
+        email.strip()
+        for email in additional_addresses.replace(";", ",").split(",")
+        if email.strip()
+    ]
+    all_emails = _normalize_email_addresses(
+        selected_emails + extra_emails
+    )
+
+    if st.button(
+        "Send Daily Report via Gmail",
+        type="primary",
+        use_container_width=True,
+        key=f"send_daily_report_gmail_{report_date.isoformat()}",
+        disabled=not all_emails,
+    ):
+        try:
+            with st.spinner("Sending Daily Report through Gmail..."):
+                send_report_via_gmail(
+                    recipients=all_emails,
+                    subject=email_subject.strip() or default_subject,
+                    body=email_message.strip(),
+                    pdf_bytes=pdf_bytes,
+                    filename=filename,
+                )
+            st.success(
+                f"Daily Report emailed successfully to "
+                f"{len(all_emails)} recipient(s)."
+            )
+        except Exception as exc:
+            st.error(f"Unable to send Daily Report: {exc}")
+
+    if not all_emails:
+        st.caption(
+            "Select at least one registered recipient or enter an "
+            "additional email address to enable sending."
+        )
+
+    st.caption(
+        "Email is sent directly from aiaofcanada@gmail.com with the PDF attached."
     )
 
 
 def render_weekly_pdf_share_controls(package: dict) -> None:
-    """Render PDF download and Outlook draft controls for the weekly report."""
+    """Render Weekly Report PDF download and direct Gmail send controls."""
     st.markdown("---")
-    st.markdown("### 📄 Export and Share")
+    st.markdown("### 📄 Export and Email Weekly Report")
 
     pdf_bytes = st.session_state.get("weekly_quantitative_pdf")
     if not pdf_bytes:
@@ -1967,12 +2274,21 @@ def render_weekly_pdf_share_controls(package: dict) -> None:
             pdf_bytes = build_weekly_trend_pdf(package)
             st.session_state["weekly_quantitative_pdf"] = pdf_bytes
         except Exception as exc:
-            st.error(f"Unable to generate the weekly PDF: {exc}")
+            st.error(f"Unable to generate the Weekly Report PDF: {exc}")
             return
 
-    current_period = str(package.get("current_period") or "weekly-report")
-    safe_period = re.sub(r"[^0-9A-Za-z_-]+", "_", current_period)
-    filename = f"AIA_Canada_Weekly_Media_Trend_{safe_period}.pdf"
+    current_period = str(
+        package.get("current_period")
+        or "weekly-report"
+    )
+    safe_period = re.sub(
+        r"[^0-9A-Za-z_-]+",
+        "_",
+        current_period,
+    )
+    filename = (
+        f"AIA_Canada_Weekly_Media_Trend_{safe_period}.pdf"
+    )
 
     st.download_button(
         "Download Weekly Trend PDF",
@@ -1988,55 +2304,94 @@ def render_weekly_pdf_share_controls(package: dict) -> None:
         recipient["label"]: recipient["email"]
         for recipient in registered_recipients
     }
+
     selected_labels = st.multiselect(
         "Select registered recipients",
         options=list(recipient_map.keys()),
         key="weekly_report_email_recipients",
         placeholder="Select SLT members or other registered users",
     )
+
     additional_addresses = st.text_input(
         "Additional email addresses",
         key="weekly_report_additional_recipients",
         placeholder="external@example.com, another@example.com",
         help="Separate multiple addresses with commas or semicolons.",
     )
-    standard_message = st.text_area(
+
+    default_subject = (
+        f"AIA Canada Weekly Media Trend Report — {current_period}"
+    )
+    email_subject = st.text_input(
+        "Email subject",
+        value=default_subject,
+        key="weekly_report_email_subject",
+    )
+
+    metrics = package.get("metrics") or {}
+    email_message = st.text_area(
         "Email message",
         value=(
             "Hello,\n\n"
-            "Please find attached the AIA Canada Weekly Quantitative Media Trend Report "
-            "for your review."
+            "Please find attached the AIA Canada Weekly Quantitative "
+            "Media Trend Report for your review.\n\n"
+            f"Reporting period: {current_period}\n"
+            f"Mention volume: {metrics.get('current_volume', 0)}\n"
+            f"Average sentiment: "
+            f"{metrics.get('current_average_sentiment', 0):.2f}\n"
+            f"High/Critical mentions: "
+            f"{metrics.get('current_high_priority', 0)}\n\n"
+            "Regards,\n"
+            "AIA Canada"
         ),
-        height=110,
+        height=170,
         key="weekly_report_email_message",
     )
 
-    selected_emails = [recipient_map[label] for label in selected_labels]
+    selected_emails = [
+        recipient_map[label]
+        for label in selected_labels
+    ]
     extra_emails = [
         email.strip()
         for email in additional_addresses.replace(";", ",").split(",")
         if email.strip()
     ]
-    all_emails = selected_emails + extra_emails
+    all_emails = _normalize_email_addresses(
+        selected_emails + extra_emails
+    )
 
-    if all_emails:
-        outlook_url = build_weekly_report_mailto(
-            package=package,
-            recipients=all_emails,
-            additional_message=standard_message,
-        )
-        st.link_button(
-            "Open Outlook Draft",
-            outlook_url,
-            use_container_width=True,
-        )
-    else:
-        st.caption("Select at least one recipient to enable the Outlook draft button.")
+    if st.button(
+        "Send Weekly Report via Gmail",
+        type="primary",
+        use_container_width=True,
+        key="send_weekly_report_gmail",
+        disabled=not all_emails,
+    ):
+        try:
+            with st.spinner("Sending Weekly Report through Gmail..."):
+                send_report_via_gmail(
+                    recipients=all_emails,
+                    subject=email_subject.strip() or default_subject,
+                    body=email_message.strip(),
+                    pdf_bytes=pdf_bytes,
+                    filename=filename,
+                )
+            st.success(
+                f"Weekly Report emailed successfully to "
+                f"{len(all_emails)} recipient(s)."
+            )
+        except Exception as exc:
+            st.error(f"Unable to send Weekly Report: {exc}")
 
-    st.info(
-        "Browser email links cannot attach local files automatically. "
-        "Download the PDF first, open the Outlook draft, then attach the downloaded PDF. "
-        "Automatic attachment requires Microsoft Graph integration and organizational OAuth approval."
+    if not all_emails:
+        st.caption(
+            "Select at least one registered recipient or enter an "
+            "additional email address to enable sending."
+        )
+
+    st.caption(
+        "Email is sent directly from aiaofcanada@gmail.com with the PDF attached."
     )
 
 
@@ -2735,6 +3090,10 @@ MANDATORY DAILY REPORT OUTPUT RULES:
             key="generate_daily_rollup",
         ):
             st.session_state.pop("latest_daily_report", None)
+            st.session_state.pop(
+                f"daily_report_pdf_{target_date.isoformat()}",
+                None,
+            )
 
             with st.spinner("Extracting records for the selected daily report..."):
                 try:
@@ -2825,6 +3184,10 @@ Mandatory requirements:
         if "latest_daily_report" in st.session_state:
             st.markdown("---")
             st.markdown(st.session_state["latest_daily_report"])
+            render_daily_gmail_share_controls(
+                report_text=st.session_state["latest_daily_report"],
+                report_date=target_date,
+            )
 
     # --- WEEKLY REPORT TAB ---
     with tab_weekly:
