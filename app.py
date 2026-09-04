@@ -21,7 +21,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
 )
-from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.shapes import Drawing, String
 from reportlab.graphics.charts.lineplots import LinePlot
 from reportlab.graphics.charts.barcharts import VerticalBarChart, HorizontalBarChart
 from reportlab.graphics.widgets.markers import makeMarker
@@ -1509,6 +1509,26 @@ def _pdf_safe(value) -> str:
     return escape(str(value))
 
 
+def _add_chart_title(
+    drawing: Drawing,
+    title: str,
+    width: float,
+    height: float,
+) -> None:
+    """Add a graphics-safe title to a ReportLab Drawing."""
+    drawing.add(
+        String(
+            width / 2,
+            height - 16,
+            str(title),
+            fontName="Helvetica-Bold",
+            fontSize=11,
+            textAnchor="middle",
+            fillColor=colors.HexColor("#222222"),
+        )
+    )
+
+
 def _make_line_chart(
     chart_df: pd.DataFrame,
     title: str,
@@ -1517,18 +1537,7 @@ def _make_line_chart(
 ) -> Drawing:
     """Build a two-series line chart for the PDF report."""
     drawing = Drawing(width, height)
-    drawing.add(
-        Paragraph(
-            _pdf_safe(title),
-            ParagraphStyle(
-                "ChartTitle",
-                parent=getSampleStyleSheet()["Heading3"],
-                alignment=TA_CENTER,
-                fontSize=11,
-                leading=13,
-            ),
-        )
-    )
+    _add_chart_title(drawing, title, width, height)
 
     if chart_df.empty:
         return drawing
@@ -1553,7 +1562,11 @@ def _make_line_chart(
     chart.xValueAxis.valueMin = 0
     chart.xValueAxis.valueMax = max(len(chart_df.index) - 1, 1)
     chart.xValueAxis.valueSteps = list(range(len(chart_df.index)))
-    chart.xValueAxis.labelTextFormat = lambda value: str(chart_df.index[int(value)]) if int(value) < len(chart_df.index) else ""
+    chart.xValueAxis.labelTextFormat = (
+        lambda value: str(chart_df.index[int(value)])
+        if int(value) < len(chart_df.index)
+        else ""
+    )
     chart.yValueAxis.valueMin = 0
     max_value = max(selected + previous + [1])
     chart.yValueAxis.valueMax = max_value + max(1, max_value * 0.15)
@@ -1570,6 +1583,8 @@ def _make_vertical_bar_chart(
 ) -> Drawing:
     """Build a grouped vertical bar chart for the PDF report."""
     drawing = Drawing(width, height)
+    _add_chart_title(drawing, title, width, height)
+
     if chart_df.empty:
         return drawing
 
@@ -1582,7 +1597,9 @@ def _make_vertical_bar_chart(
         [float(value) for value in chart_df["Selected week"].tolist()],
         [float(value) for value in chart_df["Previous week"].tolist()],
     ]
-    chart.categoryAxis.categoryNames = [str(value)[:18] for value in chart_df.index]
+    chart.categoryAxis.categoryNames = [
+        str(value)[:18] for value in chart_df.index
+    ]
     chart.categoryAxis.labels.angle = 20
     chart.categoryAxis.labels.dy = -12
     chart.categoryAxis.labels.fontSize = 7
@@ -1593,20 +1610,6 @@ def _make_vertical_bar_chart(
     chart.bars[0].fillColor = colors.HexColor("#1f77b4")
     chart.bars[1].fillColor = colors.HexColor("#7f7f7f")
     drawing.add(chart)
-
-    styles = getSampleStyleSheet()
-    drawing.add(
-        Paragraph(
-            _pdf_safe(title),
-            ParagraphStyle(
-                "BarTitle",
-                parent=styles["Heading3"],
-                alignment=TA_CENTER,
-                fontSize=11,
-                leading=13,
-            ),
-        )
-    )
     return drawing
 
 
@@ -1619,11 +1622,14 @@ def _make_horizontal_bar_chart(
 ) -> Drawing:
     """Build a grouped horizontal bar chart for the PDF report."""
     drawing = Drawing(width, height)
+    _add_chart_title(drawing, title, width, height)
+
     if chart_df.empty:
         return drawing
 
     limited_df = chart_df.head(12).copy()
     labels = [str(value)[:36] for value in limited_df[label_column].tolist()]
+
     chart = HorizontalBarChart()
     chart.x = 140
     chart.y = 35
@@ -1642,20 +1648,6 @@ def _make_horizontal_bar_chart(
     chart.bars[0].fillColor = colors.HexColor("#1f77b4")
     chart.bars[1].fillColor = colors.HexColor("#7f7f7f")
     drawing.add(chart)
-
-    styles = getSampleStyleSheet()
-    drawing.add(
-        Paragraph(
-            _pdf_safe(title),
-            ParagraphStyle(
-                "HorizontalBarTitle",
-                parent=styles["Heading3"],
-                alignment=TA_CENTER,
-                fontSize=11,
-                leading=13,
-            ),
-        )
-    )
     return drawing
 
 
@@ -1953,7 +1945,7 @@ def send_report_via_gmail(
 
     sender_email = st.secrets.get(
         "GMAIL_SENDER_EMAIL",
-        "aiaocanadamedia@gmail.com",
+        "aiaofcanada@gmail.com",
     )
     app_password = st.secrets.get("GMAIL_APP_PASSWORD")
 
@@ -2259,7 +2251,7 @@ def render_daily_gmail_share_controls(
         )
 
     st.caption(
-        "Email is sent directly from aiacanadamedia@gmail.com with the PDF attached."
+        "Email is sent directly from aiaofcanada@gmail.com with the PDF attached."
     )
 
 
@@ -2391,7 +2383,7 @@ def render_weekly_pdf_share_controls(package: dict) -> None:
         )
 
     st.caption(
-        "Email is sent directly from aiacanadamedia@gmail.com with the PDF attached."
+        "Email is sent directly from aiaofcanada@gmail.com with the PDF attached."
     )
 
 
