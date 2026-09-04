@@ -978,76 +978,6 @@ def build_weekly_quantitative_package(
         }
     ).set_index("Sentiment")
 
-    current_keyword_counts = count_keyword_mentions(current_records, keyword_rows)
-    previous_keyword_counts = count_keyword_mentions(previous_records, keyword_rows)
-    keyword_rows_output = []
-
-    for term in sorted(
-        set(current_keyword_counts) | set(previous_keyword_counts),
-        key=lambda item: current_keyword_counts.get(item, 0),
-        reverse=True,
-    ):
-        current_count = current_keyword_counts.get(term, 0)
-        previous_count = previous_keyword_counts.get(term, 0)
-        percentage_change = calculate_percentage_change(
-            current_count,
-            previous_count,
-        )
-
-        if percentage_change is None:
-            change_label = "0.0%"
-        elif percentage_change == float("inf"):
-            change_label = "New"
-        else:
-            change_label = f"{percentage_change:+.1f}%"
-
-        keyword_rows_output.append(
-            {
-                "Keyword": term,
-                "Selected week": current_count,
-                "Previous week": previous_count,
-                "Change": current_count - previous_count,
-                "Change %": change_label,
-            }
-        )
-
-    keyword_table = pd.DataFrame(keyword_rows_output)
-    if not keyword_table.empty:
-        keyword_table = keyword_table.sort_values(
-            ["Selected week", "Change"],
-            ascending=[False, False],
-        )
-
-    outlet_chart = pd.DataFrame()
-    if current_volume or previous_volume:
-        current_outlets = (
-            current_df["outlet_platform"].value_counts()
-            if current_volume
-            else pd.Series(dtype=int)
-        )
-        previous_outlets = (
-            previous_df["outlet_platform"].value_counts()
-            if previous_volume
-            else pd.Series(dtype=int)
-        )
-        top_outlets = list(
-            (current_outlets.add(previous_outlets, fill_value=0))
-            .sort_values(ascending=False)
-            .head(10)
-            .index
-        )
-        outlet_chart = pd.DataFrame(
-            {
-                "Outlet": top_outlets,
-                "Selected week": [
-                    int(current_outlets.get(outlet, 0)) for outlet in top_outlets
-                ],
-                "Previous week": [
-                    int(previous_outlets.get(outlet, 0)) for outlet in top_outlets
-                ],
-            }
-        ).set_index("Outlet")
-
     theme_chart = pd.DataFrame()
     if current_volume or previous_volume:
         current_themes = (
@@ -1079,16 +1009,14 @@ def build_weekly_quantitative_package(
         ).set_index("Theme")
 
     detail_columns = [
+        "id",
         "date_published",
         "inserted_at",
-        "outlet_platform",
         "title",
-        "theme",
         "sentiment_category",
         "sentiment_score",
         "alert_level",
         "recommendation",
-        "assigned_to_user",
     ]
     detail_table = (
         current_df[detail_columns]
@@ -1102,18 +1030,17 @@ def build_weekly_quantitative_package(
         detail_table["inserted_at"] = detail_table["inserted_at"].dt.strftime(
             "%Y-%m-%d %H:%M"
         )
+        detail_table["Link"] = detail_table["id"].apply(get_app_record_url)
+        detail_table = detail_table.drop(columns=["id"])
         detail_table = detail_table.rename(
             columns={
                 "date_published": "Published",
                 "inserted_at": "Inserted",
-                "outlet_platform": "Outlet",
                 "title": "Title",
-                "theme": "Theme",
                 "sentiment_category": "Sentiment",
                 "sentiment_score": "Score",
                 "alert_level": "Alert",
                 "recommendation": "Recommendation",
-                "assigned_to_user": "Assigned to",
             }
         )
 
@@ -1146,8 +1073,6 @@ def build_weekly_quantitative_package(
         "metrics": metrics,
         "volume_chart": volume_chart.to_dict(),
         "sentiment_chart": sentiment_chart.to_dict(),
-        "keyword_table": keyword_table.to_dict("records"),
-        "outlet_chart": outlet_chart.to_dict() if not outlet_chart.empty else {},
         "theme_chart": theme_chart.to_dict() if not theme_chart.empty else {},
         "detail_table": detail_table.to_dict("records"),
     }
@@ -1167,13 +1092,13 @@ Rules:
 3. Compare the selected week with the previous week.
 4. Explicitly identify increases, decreases and unchanged measures.
 5. Treat low-volume samples cautiously and say when a trend may be unstable.
-6. Highlight sentiment movement, volume movement, keyword movement, outlet
-   concentration, themes and high-priority mentions.
+6. Highlight sentiment movement, volume movement, theme changes and
+   high-priority mentions.
 7. Use Canadian Press style.
 8. Provide exactly these sections:
    ## Quantitative Executive Summary
    ## Material Week-over-Week Changes
-   ## Emerging Topics and Keywords
+   ## Theme and Sentiment Trends
    ## Risks and Recommended Actions
 9. Keep the analysis concise and suitable for executives.
 """
@@ -1187,7 +1112,7 @@ Rules:
 
 
 def render_weekly_quantitative_report(package: dict) -> None:
-    """Render a persistent quantitative weekly dashboard with explicit charts."""
+    """Render the quantitative weekly dashboard."""
     metrics = package["metrics"]
 
     st.markdown("### Quantitative Executive Dashboard")
@@ -1253,8 +1178,6 @@ def render_weekly_quantitative_report(package: dict) -> None:
     volume_df = pd.DataFrame(package.get("volume_chart") or {})
     sentiment_df = pd.DataFrame(package.get("sentiment_chart") or {})
     theme_df = pd.DataFrame(package.get("theme_chart") or {})
-    outlet_df = pd.DataFrame(package.get("outlet_chart") or {})
-    keyword_df = pd.DataFrame(package.get("keyword_table") or [])
 
     volume_col, sentiment_col = st.columns(2)
 
@@ -1350,124 +1273,30 @@ def render_weekly_quantitative_report(package: dict) -> None:
                 use_container_width=True,
             )
 
-    keyword_col, theme_col = st.columns(2)
-
-    with keyword_col:
-        st.markdown("#### Keyword Mention Trends")
-        if keyword_df.empty:
-            st.info("No configured monitoring keywords matched either week.")
-        else:
-            keyword_plot = keyword_df.head(15).melt(
-                id_vars="Keyword",
-                value_vars=["Selected week", "Previous week"],
-                var_name="Period",
-                value_name="Mentions",
-            )
-            st.vega_lite_chart(
-                keyword_plot,
-                {
-                    "mark": "bar",
-                    "encoding": {
-                        "y": {
-                            "field": "Keyword",
-                            "type": "nominal",
-                            "sort": "-x",
-                            "title": "Keyword",
-                        },
-                        "x": {
-                            "field": "Mentions",
-                            "type": "quantitative",
-                            "title": "Mention count",
-                        },
-                        "yOffset": {"field": "Period"},
-                        "color": {
-                            "field": "Period",
-                            "type": "nominal",
-                            "title": "Period",
-                        },
-                        "tooltip": [
-                            {"field": "Keyword", "type": "nominal"},
-                            {"field": "Period", "type": "nominal"},
-                            {"field": "Mentions", "type": "quantitative"},
-                        ],
-                    },
-                },
-                use_container_width=True,
-            )
-            with st.expander("View keyword comparison table"):
-                st.dataframe(keyword_df, use_container_width=True, hide_index=True)
-
-    with theme_col:
-        st.markdown("#### Theme Volume")
-        if theme_df.empty:
-            st.info("No theme data is available.")
-        else:
-            theme_plot = (
-                theme_df.rename_axis("Theme")
-                .reset_index()
-                .melt(
-                    id_vars="Theme",
-                    value_vars=["Selected week", "Previous week"],
-                    var_name="Period",
-                    value_name="Mentions",
-                )
-            )
-            st.vega_lite_chart(
-                theme_plot,
-                {
-                    "mark": "bar",
-                    "encoding": {
-                        "y": {
-                            "field": "Theme",
-                            "type": "nominal",
-                            "sort": "-x",
-                            "title": "Theme",
-                        },
-                        "x": {
-                            "field": "Mentions",
-                            "type": "quantitative",
-                            "title": "Mention count",
-                        },
-                        "yOffset": {"field": "Period"},
-                        "color": {
-                            "field": "Period",
-                            "type": "nominal",
-                            "title": "Period",
-                        },
-                        "tooltip": [
-                            {"field": "Theme", "type": "nominal"},
-                            {"field": "Period", "type": "nominal"},
-                            {"field": "Mentions", "type": "quantitative"},
-                        ],
-                    },
-                },
-                use_container_width=True,
-            )
-
-    st.markdown("#### Top Outlet Volume")
-    if outlet_df.empty:
-        st.info("No outlet data is available.")
+    st.markdown("#### Theme Volume")
+    if theme_df.empty:
+        st.info("No theme data is available.")
     else:
-        outlet_plot = (
-            outlet_df.rename_axis("Outlet")
+        theme_plot = (
+            theme_df.rename_axis("Theme")
             .reset_index()
             .melt(
-                id_vars="Outlet",
+                id_vars="Theme",
                 value_vars=["Selected week", "Previous week"],
                 var_name="Period",
                 value_name="Mentions",
             )
         )
         st.vega_lite_chart(
-            outlet_plot,
+            theme_plot,
             {
                 "mark": "bar",
                 "encoding": {
                     "y": {
-                        "field": "Outlet",
+                        "field": "Theme",
                         "type": "nominal",
                         "sort": "-x",
-                        "title": "Outlet",
+                        "title": "Theme",
                     },
                     "x": {
                         "field": "Mentions",
@@ -1481,7 +1310,7 @@ def render_weekly_quantitative_report(package: dict) -> None:
                         "title": "Period",
                     },
                     "tooltip": [
-                        {"field": "Outlet", "type": "nominal"},
+                        {"field": "Theme", "type": "nominal"},
                         {"field": "Period", "type": "nominal"},
                         {"field": "Mentions", "type": "quantitative"},
                     ],
@@ -1498,8 +1327,18 @@ def render_weekly_quantitative_report(package: dict) -> None:
         if detail_df.empty:
             st.info("No reportable mentions were available.")
         else:
-            st.dataframe(detail_df, use_container_width=True, hide_index=True)
-
+            column_config = {}
+            if "Link" in detail_df.columns:
+                column_config["Link"] = st.column_config.LinkColumn(
+                    "Mention",
+                    display_text="Open mention",
+                )
+            st.dataframe(
+                detail_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config=column_config,
+            )
 
 
 def _pdf_safe(value) -> str:
@@ -1787,9 +1626,7 @@ def build_weekly_trend_pdf(package: dict) -> bytes:
 
     volume_df = pd.DataFrame(package.get("volume_chart") or {})
     sentiment_df = pd.DataFrame(package.get("sentiment_chart") or {})
-    keyword_df = pd.DataFrame(package.get("keyword_table") or [])
     theme_df = pd.DataFrame(package.get("theme_chart") or {})
-    outlet_df = pd.DataFrame(package.get("outlet_chart") or {})
 
     story.extend(
         [
@@ -1800,18 +1637,6 @@ def build_weekly_trend_pdf(package: dict) -> bytes:
             PageBreak(),
         ]
     )
-
-    if not keyword_df.empty:
-        story.extend(
-            [
-                _make_horizontal_bar_chart(
-                    keyword_df.sort_values("Selected week", ascending=False),
-                    "Keyword Mention Trends",
-                    "Keyword",
-                ),
-                Spacer(1, 12),
-            ]
-        )
 
     if not theme_df.empty:
         theme_pdf_df = theme_df.rename_axis("Theme").reset_index()
@@ -1826,19 +1651,6 @@ def build_weekly_trend_pdf(package: dict) -> bytes:
             ]
         )
 
-    if not outlet_df.empty:
-        outlet_pdf_df = outlet_df.rename_axis("Outlet").reset_index()
-        story.extend(
-            [
-                _make_horizontal_bar_chart(
-                    outlet_pdf_df.sort_values("Selected week", ascending=False),
-                    "Top Outlet Volume",
-                    "Outlet",
-                ),
-                Spacer(1, 12),
-            ]
-        )
-
     detail_df = pd.DataFrame(package.get("detail_table") or [])
     if not detail_df.empty:
         story.append(Paragraph("Selected-Week Mention Detail", styles["Heading1"]))
@@ -1846,14 +1658,13 @@ def build_weekly_trend_pdf(package: dict) -> bytes:
             column
             for column in [
                 "Published",
-                "Outlet",
+                "Inserted",
                 "Title",
-                "Theme",
                 "Sentiment",
                 "Score",
                 "Alert",
                 "Recommendation",
-                "Assigned to",
+                "Link",
             ]
             if column in detail_df.columns
         ]
@@ -1862,20 +1673,31 @@ def build_weekly_trend_pdf(package: dict) -> bytes:
             [Paragraph(_pdf_safe(column), styles["SmallBody"]) for column in display_columns]
         ]
         for _, row in detail_df.iterrows():
-            detail_rows.append(
-                [
-                    Paragraph(_pdf_safe(row[column]), styles["SmallBody"])
-                    for column in display_columns
-                ]
-            )
+            rendered_row = []
+            for column in display_columns:
+                if column == "Link" and row[column]:
+                    link_url = _pdf_safe(row[column])
+                    rendered_row.append(
+                        Paragraph(
+                            f'<link href="{link_url}" color="blue">Open mention</link>',
+                            styles["SmallBody"],
+                        )
+                    )
+                else:
+                    rendered_row.append(
+                        Paragraph(_pdf_safe(row[column]), styles["SmallBody"])
+                    )
+            detail_rows.append(rendered_row)
 
         available_width = 10.0 * inch
         widths = []
         for column in display_columns:
             if column == "Title":
-                widths.append(2.6 * inch)
-            elif column in {"Outlet", "Theme", "Assigned to"}:
-                widths.append(1.25 * inch)
+                widths.append(3.2 * inch)
+            elif column == "Link":
+                widths.append(1.2 * inch)
+            elif column in {"Published", "Inserted"}:
+                widths.append(1.1 * inch)
             else:
                 widths.append(0.9 * inch)
         scale = available_width / sum(widths)
