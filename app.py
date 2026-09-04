@@ -1010,6 +1010,7 @@ def build_weekly_quantitative_package(
 
     detail_columns = [
         "id",
+        "url",
         "date_published",
         "inserted_at",
         "title",
@@ -1030,8 +1031,8 @@ def build_weekly_quantitative_package(
         detail_table["inserted_at"] = detail_table["inserted_at"].dt.strftime(
             "%Y-%m-%d %H:%M"
         )
-        detail_table["Link"] = detail_table["id"].apply(get_app_record_url)
-        detail_table = detail_table.drop(columns=["id"])
+        detail_table["Link"] = detail_table["url"].fillna("")
+        detail_table = detail_table.drop(columns=["id", "url"])
         detail_table = detail_table.rename(
             columns={
                 "date_published": "Published",
@@ -1330,8 +1331,8 @@ def render_weekly_quantitative_report(package: dict) -> None:
             column_config = {}
             if "Link" in detail_df.columns:
                 column_config["Link"] = st.column_config.LinkColumn(
-                    "Mention",
-                    display_text="Open mention",
+                    "Article",
+                    display_text="Read article",
                 )
             st.dataframe(
                 detail_df,
@@ -1679,7 +1680,7 @@ def build_weekly_trend_pdf(package: dict) -> bytes:
                     link_url = _pdf_safe(row[column])
                     rendered_row.append(
                         Paragraph(
-                            f'<link href="{link_url}" color="blue">Open mention</link>',
+                            f'<link href="{link_url}" color="blue">Read article</link>',
                             styles["SmallBody"],
                         )
                     )
