@@ -3054,25 +3054,28 @@ elif app_mode == "📝 Report Builder":
 {stored_daily_instruction}
 
 MANDATORY DAILY REPORT OUTPUT RULES:
-- Begin the report with a section titled exactly "## Executive Summary".
-- The Executive Summary must be 3 to 5 concise sentences written for senior
-  leadership.
-- Summarize the day's overall media volume, dominant themes, overall sentiment,
-  highest-priority issue, affected AIA Canada sub-brands, and any immediate
-  action required.
-- Do not list every mention in the Executive Summary.
-- Do not invent trends, risks, actions, or conclusions not supported by the
-  supplied records.
-- After the Executive Summary, continue with the detailed daily roundup using
-  the structure requested by the saved report template.
 - The supplied records have already been filtered for report eligibility.
 - Do not include, summarize, count, reference, or create a section for noise.
 - Do not create a section named "Filtered Noise".
 - Do not include records whose status is noise.
 - Do not include records whose recommendation is ignore.
 - Build the report only from the eligible records supplied in the user message.
-- If an earlier instruction conflicts with these output or exclusion rules,
-  these rules take precedence.
+- The Executive Summary is generated separately by the application.
+- For the detailed mention list, output only a section titled exactly
+  "## Daily Mentions".
+- For each mention, include only:
+  1. the exact article title as a Markdown level-3 heading,
+  2. a concise one- or two-sentence plain-language description of what the
+     article says,
+  3. one Markdown link formatted exactly as
+     "[Read Article](EXACT_URL)".
+- Do not include outlet, publication date, assigned owner, sentiment,
+  sentiment score, recommendation, status, brand tags, UUIDs, internal links,
+  tables, matrices, bullets, or additional metadata in the detailed mention list.
+- Keep the wording clean, neutral, concise, and easy to scan.
+- Do not add introductory or closing commentary around the mention list.
+- If an earlier saved-template instruction conflicts with these rules, these
+  rules take precedence.
 """
 
         if st.button(
@@ -3134,9 +3137,12 @@ Mandatory requirements:
                             contents=[
                                 (
                                     f"Daily report date: {target_date.isoformat()}\n\n"
-                                    "Prepare the detailed daily roundup from the eligible "
-                                    "records below. Do not mention noise or ignored records. "
-                                    "Do not create a Filtered Noise section.\n\n"
+                                    "Prepare the detailed mention list from the eligible "
+                                    "records below. The output must contain only the "
+                                    "'## Daily Mentions' section. For each record, show only "
+                                    "the article title, a concise one- or two-sentence "
+                                    "description, and the external Read Article link. "
+                                    "Do not include any other fields or metadata.\n\n"
                                     f"Eligible daily media records:\n{daily_mentions}"
                                 )
                             ],
